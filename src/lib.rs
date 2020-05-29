@@ -1,4 +1,10 @@
-#![deny(rust_2018_idioms, unused, unused_import_braces, unused_qualifications, warnings)]
+//! This crate provides a handler for dependency-based asynchronous control flow.
+//!
+//! It assumes you have several interdependent units of changing state, which are modeled as nodes in a control flow graph. Nodes could be the contents of a file, the current time, etc.
+//!
+//! A control flow graph is represented by the type `CtrlFlow`, whose `get_ext` method is used to query the state of a node (starting its computation if necessary).
+
+#![deny(missing_docs, rust_2018_idioms, unused, unused_import_braces, unused_qualifications, warnings)]
 
 #![recursion_limit = "256"] // for stream!
 
@@ -47,12 +53,22 @@ use tokio::{
     task
 };
 
+/// An error returned by `Delta::update`.
 #[derive(Debug, Clone, Copy)]
 pub struct MissingInitialState(&'static str);
 
+/// A type implementing this trait represents a change to a node's state.
 pub trait Delta: fmt::Debug + Clone + Send + Sync + Unpin + 'static {
+    /// The state which this delta modifies.
     type State: fmt::Debug + Clone + Send;
 
+    /// Returns the “initial state” event corresponding to the given state.
+    ///
+    /// # Correctness
+    ///
+    /// ```rust
+    /// Delta::from_initial_state(init).initial_state() == Some(init)
+    /// ```
     fn from_initial_state(init: Self::State) -> Self;
 
     /// Returns the initial state if this is an “initial state” event.
@@ -62,9 +78,17 @@ pub trait Delta: fmt::Debug + Clone + Send + Sync + Unpin + 'static {
     /// The first `Delta` in a stream should always return `Some` here.
     fn initial_state(self) -> Option<Self::State>;
 
+    /// A brief representation of the kind of event this delta represents, used for `Debug` in `MissingInitialState`. Usually corresponds to the enum discriminant if `Self` is an enum.
     fn kind(&self) -> &'static str;
+
+    /// Called by `update` if the `state` is already initialized.
     fn update_inner(self, state: &mut Self::State);
 
+    /// Apply this `Delta` to the given `state`.
+    ///
+    /// # Errors
+    ///
+    /// If `state` is `None` and `self.initial_state()` returns `None`, the stream is malformed and an error is returned.
     fn update(self, state: &mut Option<Self::State>) -> Result<(), MissingInitialState> {
         let kind = self.kind();
         if let Some(state) = state {
@@ -78,6 +102,7 @@ pub trait Delta: fmt::Debug + Clone + Send + Sync + Unpin + 'static {
     }
 }
 
+/// A type implementing this trait describes the nodes of a control flow graph.
 pub trait NodeId: fmt::Debug + Clone + Eq + Hash {
     /// The type yielded by streams of nodes of this type.
     type Delta: Delta;
@@ -86,7 +111,7 @@ pub trait NodeId: fmt::Debug + Clone + Eq + Hash {
     fn stream(&self) -> Box<dyn Stream<Item = Self::Delta> + Send + Unpin + 'static>;
 }
 
-/// The main entry point for the API. An instance of this type manages the control-flow graph, ensures that there are no cycles, and handles the type magic.
+/// The main entry point for the API. An instance of this type manages the control-flow graph and ensures that there are no cycles.
 #[derive(Debug, Default)]
 pub struct CtrlFlow<I: NodeId> {
     /// A graph of the “depends on” relation between control flow nodes.
@@ -100,7 +125,7 @@ impl<I: NodeId> CtrlFlow<I> {
     ///
     /// # Correctness
     ///
-    /// This method must only be called from outside the graph represented by this `CtrlFlow`. Stream implementations for `DepId` should use `register_internal` instead.
+    /// This method must only be called from outside the graph represented by this `CtrlFlow`. Stream implementations for `DepId` should use `get_int` instead.
     ///
     /// # Panics
     ///
@@ -122,6 +147,10 @@ impl<I: NodeId> CtrlFlow<I> {
     /// # Correctness
     ///
     /// This method must only be called from inside the graph represented by this `CtrlFlow`. The `from` parameter must be the ID of the calling node.
+    ///
+    /// # Errors
+    ///
+    /// If adding this dependency would result in a dependency loop, an error is returned containing the dependency path from `nid` to `from`.
     ///
     /// # Panics
     ///
@@ -162,8 +191,9 @@ impl<I: NodeId> CtrlFlow<I> {
     }
 }
 
+/// This type facilitates subscribing to a node's state.
 #[derive(Debug, Clone)]
-pub struct StateDelta<D: Delta>(Arc<Mutex<(Option<D::State>, Vec<Sender<D>>)>>);
+struct StateDelta<D: Delta>(Arc<Mutex<(Option<D::State>, Vec<Sender<D>>)>>);
 
 impl<D: Delta> StateDelta<D> {
     fn new(mut stream: impl Stream<Item = D> + Send + Unpin + 'static) -> StateDelta<D> {
@@ -185,6 +215,7 @@ impl<D: Delta> StateDelta<D> {
         StateDelta(arc)
     }
 
+    /// The first item of this stream is guaranteed to be an “initial state” delta.
     pub fn stream(&self) -> impl Stream<Item = D> {
         let arc = self.0.clone();
         stream! {
