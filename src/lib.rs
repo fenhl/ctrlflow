@@ -21,7 +21,6 @@ use {
         hash::Hash,
         sync::Arc
     },
-    async_stream::stream,
     futures::prelude::*,
     itertools::Itertools as _,
     petgraph::{
@@ -36,6 +35,7 @@ use {
 use async_std::{
     sync::{
         Mutex,
+        Receiver,
         Sender,
         channel
     },
@@ -46,6 +46,7 @@ use tokio::{
     sync::{
         Mutex,
         mpsc::{
+            Receiver,
             Sender,
             channel
         }
@@ -130,8 +131,8 @@ impl<I: NodeId> CtrlFlow<I> {
     /// # Panics
     ///
     /// The returned stream panics if `nid` doesn't produce values of type `T`.
-    pub fn get_ext<T: TryFrom<I::Delta>>(&mut self, nid: I) -> impl Stream<Item = T>
-    where T::Error: fmt::Debug {
+    pub async fn get_ext<T: Delta + TryFrom<I::Delta>>(&mut self, nid: I) -> StateDelta<T>
+    where <T as TryFrom<I::Delta>>::Error: fmt::Debug {
         let sd = if let Some(sd) = self.state_deltas.get(&nid) {
             sd.clone()
         } else {
@@ -139,7 +140,7 @@ impl<I: NodeId> CtrlFlow<I> {
             self.state_deltas.insert(nid, sd.clone());
             sd
         };
-        sd.stream().map(|x| T::try_from(x).expect("cannot convert delta"))
+        sd.try_into().await
     }
 
     /// Requests a copy of the data stream for the given node.
@@ -155,8 +156,8 @@ impl<I: NodeId> CtrlFlow<I> {
     /// # Panics
     ///
     /// The returned stream panics if `nid` doesn't produce values of type `T`.
-    pub fn get_int<T: TryFrom<I::Delta>>(&mut self, from: I, nid: I) -> Result<impl Stream<Item = T>, Vec<I>>
-    where T::Error: fmt::Debug {
+    pub async fn get_int<T: Delta + TryFrom<I::Delta>>(&mut self, from: I, nid: I) -> Result<StateDelta<T>, Vec<I>>
+    where <T as TryFrom<I::Delta>>::Error: fmt::Debug {
         let nid_ix = if let Some(&nid_ix) = self.indices.get(&nid) {
             if let Some(&from_ix) = self.indices.get(&from) {
                 if let Some((_, path)) = astar(&self.graph, nid_ix, |ix| ix == from_ix, |_| 1, |_| 0) {
@@ -187,13 +188,13 @@ impl<I: NodeId> CtrlFlow<I> {
             from_ix
         };
         self.graph.add_edge(nid_ix, from_ix, ());
-        Ok(self.get_ext::<T>(nid))
+        Ok(self.get_ext::<T>(nid).await)
     }
 }
 
 /// This type facilitates subscribing to a node's state.
 #[derive(Debug, Clone)]
-struct StateDelta<D: Delta>(Arc<Mutex<(Option<D::State>, Vec<Sender<D>>)>>);
+pub struct StateDelta<D: Delta>(Arc<Mutex<(Option<D::State>, Vec<Sender<D>>)>>);
 
 impl<D: Delta> StateDelta<D> {
     fn new(mut stream: impl Stream<Item = D> + Send + Unpin + 'static) -> StateDelta<D> {
@@ -215,29 +216,31 @@ impl<D: Delta> StateDelta<D> {
         StateDelta(arc)
     }
 
+    /// Returns the current state, potentially waiting for initialization.
+    pub async fn state(&self) -> D::State {
+        let opt_state = &self.0.lock().await.0;
+        if let Some(state) = opt_state { return state.clone(); }
+        let _ = self.stream().await.next().await;
+        self.0.lock().await.0.clone().expect("state empty after initial state event")
+    }
+
     /// The first item of this stream is guaranteed to be an “initial state” delta.
-    pub fn stream(&self) -> impl Stream<Item = D> {
-        let arc = self.0.clone();
-        stream! {
-            let mut rx = {
-                let (ref state, ref mut txs) = *arc.lock().await;
-                let (mut tx, mut rx) = channel(usize::MAX);
-                if let Some(state) = state {
-                    #[cfg(feature = "async-std")] tx.send(D::from_initial_state(state.clone())).await;
-                    #[cfg(feature = "tokio")] if tx.send(D::from_initial_state(state.clone())).await.is_err() {
-                        // no longer listening
-                        return;
-                    }
-                }
-                txs.push(tx);
-                rx
-            };
-            #[cfg(feature = "async-std")] while let Some(item) = rx.next().await {
-                yield item;
-            }
-            #[cfg(feature = "tokio")] while let Some(item) = rx.recv().await {
-                yield item;
-            }
+    pub async fn stream(&self) -> Receiver<D> {
+        let (ref state, ref mut txs) = *self.0.lock().await;
+        #[allow(unused_mut)] let (mut tx, rx) = channel(usize::MAX);
+        if let Some(state) = state {
+            #[cfg(feature = "async-std")] tx.send(D::from_initial_state(state.clone())).await;
+            #[cfg(feature = "tokio")] tx.send(D::from_initial_state(state.clone())).await.expect("rx is still in scope");
         }
+        txs.push(tx);
+        rx
+    }
+
+    async fn try_into<T: Delta + TryFrom<D>>(self) -> StateDelta<T>
+    where <T as TryFrom<D>>::Error: fmt::Debug {
+        let stream = self.stream().await.map(|x|
+            T::try_from(x).expect("cannot convert delta")
+        );
+        StateDelta::new(stream)
     }
 }
