@@ -8,6 +8,7 @@ edition = "2018"
 futures = "0.3"
 itertools = "0.9"
 petgraph = "0.5"
+smart-default = "0.6"
 
 [dependencies.async-std]
 version = "1"

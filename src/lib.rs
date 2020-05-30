@@ -29,7 +29,8 @@ use {
             DiGraph,
             NodeIndex
         }
-    }
+    },
+    smart_default::SmartDefault
 };
 #[cfg(feature = "async-std")]
 use async_std::{
@@ -113,9 +114,10 @@ pub trait NodeId: fmt::Debug + Clone + Eq + Hash {
 }
 
 /// The main entry point for the API. An instance of this type manages the control-flow graph and ensures that there are no cycles.
-#[derive(Debug, Default)]
+#[derive(Debug, SmartDefault)]
 pub struct CtrlFlow<I: NodeId> {
     /// A graph of the “depends on” relation between control flow nodes.
+    #[default(DiGraph::new())]
     graph: DiGraph<I, ()>,
     indices: HashMap<I, NodeIndex>,
     state_deltas: HashMap<I, StateDelta<I::Delta>>
