@@ -61,7 +61,7 @@ use tokio::{
 pub struct MissingInitialState(&'static str);
 
 /// A type implementing this trait represents a change to a node's state.
-pub trait Delta: fmt::Debug + Clone + Send + Sync + Unpin + 'static {
+pub trait Delta: fmt::Debug + Clone + Send + Sync + 'static {
     /// The state which this delta modifies.
     type State: fmt::Debug + Clone + Send;
 
@@ -111,7 +111,7 @@ pub trait NodeId: fmt::Debug + Clone + Eq + Hash {
     type Delta: Delta;
 
     /// Contains the logic for this node.
-    fn stream(&self) -> Pin<Box<dyn Stream<Item = Self::Delta> + Send + Unpin + 'static>>;
+    fn stream(&self) -> Pin<Box<dyn Stream<Item = Self::Delta> + Send + 'static>>;
 }
 
 /// The main entry point for the API. An instance of this type manages the control-flow graph and ensures that there are no cycles.
@@ -213,7 +213,7 @@ impl<D: Delta> StateDelta<D> {
                         //TODO remove `tx` from `txs`
                     }
                 }
-                delta.update(state).expect("delta is non-init but state is None"); //TODO
+                delta.update(state).expect("delta is non-init but state is None");
             }
         });
         StateDelta(arc)
