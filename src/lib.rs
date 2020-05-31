@@ -19,6 +19,7 @@ use {
         convert::TryFrom,
         fmt,
         hash::Hash,
+        pin::Pin,
         sync::Arc
     },
     futures::prelude::*,
@@ -110,7 +111,7 @@ pub trait NodeId: fmt::Debug + Clone + Eq + Hash {
     type Delta: Delta;
 
     /// Contains the logic for this node.
-    fn stream(&self) -> Box<dyn Stream<Item = Self::Delta> + Send + Unpin + 'static>;
+    fn stream(&self) -> Pin<Box<dyn Stream<Item = Self::Delta> + Send + Unpin + 'static>>;
 }
 
 /// The main entry point for the API. An instance of this type manages the control-flow graph and ensures that there are no cycles.
