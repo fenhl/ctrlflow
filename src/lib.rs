@@ -56,6 +56,106 @@ use tokio::{
     task
 };
 
+/// Generates a `NodeId` enum that can yield different types of deltas depending on the variant.
+#[macro_export] macro_rules! ctrlflow {
+    ($($NodeKind:ident($InnerId:ty, $Delta:ty) => $stream:expr),*) => {
+        #[derive(Debug, Clone)]
+        enum StateWrap {
+            $(
+                $NodeKind(<$Delta as Delta>::State)
+            ),*
+        }
+
+        #[derive(Debug, Clone)]
+        enum DeltaWrap {
+            $(
+                $NodeKind($Delta)
+            ),*
+        }
+
+        $(
+            impl From<$Delta> for DeltaWrap {
+                fn from(inner: $Delta) -> DeltaWrap {
+                    DeltaWrap::$NodeKind(inner)
+                }
+            }
+
+            impl TryFrom<DeltaWrap> for $Delta {
+                type Error = ();
+
+                fn try_from(wrap: DeltaWrap) -> Result<$Delta, ()> {
+                    match wrap {
+                        DeltaWrap::$NodeKind(inner) => Ok(inner),
+                        #[allow(unreachable_patterns)] _ => Err(())
+                    }
+                }
+            }
+        )*
+
+        impl Delta for DeltaWrap {
+            type State = StateWrap;
+
+            fn from_initial_state(state: StateWrap) -> DeltaWrap {
+                match state {
+                    $(
+                        StateWrap::$NodeKind(inner) => DeltaWrap::$NodeKind(<$Delta as Delta>::from_initial_state(inner))
+                    ),*
+                }
+            }
+
+            fn initial_state(self) -> Option<StateWrap> {
+                match self {
+                    $(
+                        DeltaWrap::$NodeKind(inner) => inner.initial_state().map(StateWrap::$NodeKind)
+                    ),*
+                }
+            }
+
+            fn kind(&self) -> &'static str {
+                match self {
+                    $(
+                        DeltaWrap::$NodeKind(_) => stringify!($NodeKind)
+                    )*
+                }
+            }
+
+            fn update_inner(self, state: &mut StateWrap) {
+                let kind = self.kind();
+                #[allow(irrefutable_let_patterns)] match self {
+                    $(
+                        DeltaWrap::$NodeKind(delta) => if let StateWrap::$NodeKind(state) = state {
+                            delta.update_inner(state);
+                        } else {
+                            panic!("expected delta of kind {}", kind);
+                        }
+                    )*
+                }
+            }
+        }
+
+        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+        enum NodeId {
+            $(
+                $NodeKind($InnerId)
+            ),*
+        }
+
+        impl NodeId for NodeId {
+            type Delta = DeltaWrap;
+
+            fn stream(&self) -> Pin<Box<dyn Stream<Item = DeltaWrap> + Send + 'static>> {
+                match self {
+                    $(
+                        NodeId::$NodeKind(inner) => {
+                            Box::pin($stream(inner.clone()).map(|d| <DeltaWrap as From<$Delta>>::from(d)))
+                        }
+                    )*
+                }
+            }
+        }
+    };
+}
+
 /// An error returned by `Delta::update`.
 #[derive(Debug, Clone, Copy)]
 pub struct MissingInitialState(&'static str);
