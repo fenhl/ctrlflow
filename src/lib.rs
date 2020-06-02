@@ -62,7 +62,7 @@ use tokio::{
         #[derive(Debug, Clone)]
         enum StateWrap {
             $(
-                $NodeKind(<$Delta as Delta>::State)
+                $NodeKind(<$Delta as $crate::Delta>::State)
             ),*
         }
 
@@ -92,13 +92,13 @@ use tokio::{
             }
         )*
 
-        impl Delta for DeltaWrap {
+        impl $crate::Delta for DeltaWrap {
             type State = StateWrap;
 
             fn from_initial_state(state: StateWrap) -> DeltaWrap {
                 match state {
                     $(
-                        StateWrap::$NodeKind(inner) => DeltaWrap::$NodeKind(<$Delta as Delta>::from_initial_state(inner))
+                        StateWrap::$NodeKind(inner) => DeltaWrap::$NodeKind(<$Delta as $crate::Delta>::from_initial_state(inner))
                     ),*
                 }
             }
@@ -140,7 +140,7 @@ use tokio::{
             ),*
         }
 
-        impl NodeId for NodeId {
+        impl $crate::NodeId for NodeId {
             type Delta = DeltaWrap;
 
             fn stream(&self) -> Pin<Box<dyn Stream<Item = DeltaWrap> + Send + 'static>> {
