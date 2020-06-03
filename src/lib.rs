@@ -330,7 +330,7 @@ impl<D: Delta> StateDelta<D> {
     /// The first item of this stream is guaranteed to be an “initial state” delta.
     pub async fn stream(&self) -> Receiver<D> {
         let (ref state, ref mut txs) = *self.0.lock().await;
-        #[allow(unused_mut)] let (mut tx, rx) = channel(usize::MAX);
+        #[allow(unused_mut)] let (mut tx, rx) = channel(1_024); // usize::MAX causes a “assertion failed: permits <= MAX_PERMITS” panic
         if let Some(state) = state {
             #[cfg(feature = "async-std")] tx.send(D::from_initial_state(state.clone())).await;
             #[cfg(feature = "tokio")] tx.send(D::from_initial_state(state.clone())).await.expect("rx is still in scope");
