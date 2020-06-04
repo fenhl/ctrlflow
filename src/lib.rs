@@ -321,8 +321,10 @@ impl<D: Delta> StateDelta<D> {
 
     /// Returns the current state, potentially waiting for initialization.
     pub async fn state(&self) -> D::State {
-        let opt_state = &self.0.lock().await.0;
-        if let Some(state) = opt_state { return state.clone(); }
+        {
+            let opt_state = &self.0.lock().await.0;
+            if let Some(state) = opt_state { return state.clone(); }
+        }
         let _ = self.stream().await.next().await;
         self.0.lock().await.0.clone().expect("state empty after initial state event")
     }
