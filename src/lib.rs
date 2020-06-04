@@ -115,7 +115,7 @@ use tokio::{
                 match self {
                     $(
                         DeltaWrap::$NodeKind(_) => stringify!($NodeKind)
-                    )*
+                    ),*
                 }
             }
 
@@ -128,7 +128,7 @@ use tokio::{
                         } else {
                             panic!("expected delta of kind {}", kind);
                         }
-                    )*
+                    ),*
                 }
             }
         }
@@ -146,10 +146,8 @@ use tokio::{
             fn stream(&self) -> Pin<Box<dyn Stream<Item = DeltaWrap> + Send + 'static>> {
                 match self {
                     $(
-                        NodeId::$NodeKind(inner) => {
-                            Box::pin($stream(inner.clone()).map(|d| <DeltaWrap as From<$Delta>>::from(d)))
-                        }
-                    )*
+                        NodeId::$NodeKind(inner) => Box::pin($stream(inner.clone()).map(|d| <DeltaWrap as From<$Delta>>::from(d)))
+                    ),*
                 }
             }
         }
