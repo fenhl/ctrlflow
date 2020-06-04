@@ -203,6 +203,35 @@ pub trait Delta: fmt::Debug + Clone + Send + Sync + 'static {
     }
 }
 
+impl<D: Delta, E: fmt::Debug + Clone + Send + Sync + 'static> Delta for Result<D, E> {
+    type State = Result<D::State, E>;
+
+    fn from_initial_state(init: Result<D::State, E>) -> Result<D, E> {
+        init.map(D::from_initial_state)
+    }
+
+    fn initial_state(self) -> Option<Result<D::State, E>> {
+        self.map(D::initial_state).transpose()
+    }
+
+    fn kind(&self) -> &'static str {
+        if let Ok(d) = self {
+            d.kind()
+        } else {
+            "error"
+        }
+    }
+
+    fn update_inner(self, state: &mut Result<D::State, E>) {
+        if let Ok(s) = state {
+            match self {
+                Ok(d) => { d.update_inner(s); }
+                Err(e) => { *state = Err(e); }
+            }
+        }
+    }
+}
+
 /// A type implementing this trait describes the nodes of a control flow graph.
 pub trait NodeId: fmt::Debug + Clone + Eq + Hash {
     /// The type yielded by streams of nodes of this type.
