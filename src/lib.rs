@@ -251,7 +251,7 @@ struct CtrlFlowInner<I: NodeId> {
 }
 
 /// The main entry point for the API. An instance of this type manages the control-flow graph and ensures that there are no cycles.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, SmartDefault, Clone)]
 pub struct CtrlFlow<I: NodeId>(Arc<Mutex<CtrlFlowInner<I>>>);
 
 impl<I: NodeId> CtrlFlow<I> {
