@@ -143,10 +143,10 @@ use tokio::{
         impl $crate::NodeId for NodeId {
             type Delta = DeltaWrap;
 
-            fn stream(&self) -> Pin<Box<dyn Stream<Item = DeltaWrap> + Send + 'static>> {
+            fn stream(&self, flow: CtrlFlow<NodeId>) -> Pin<Box<dyn Stream<Item = DeltaWrap> + Send + 'static>> {
                 match self {
                     $(
-                        NodeId::$NodeKind(inner) => Box::pin($stream(inner.clone()).map(|d| <DeltaWrap as From<$Delta>>::from(d)))
+                        NodeId::$NodeKind(inner) => Box::pin($stream(flow, inner.clone()).map(|d| <DeltaWrap as From<$Delta>>::from(d)))
                     ),*
                 }
             }
@@ -238,18 +238,21 @@ pub trait NodeId: fmt::Debug + Clone + Eq + Hash {
     type Delta: Delta;
 
     /// Contains the logic for this node.
-    fn stream(&self) -> Pin<Box<dyn Stream<Item = Self::Delta> + Send + 'static>>;
+    fn stream(&self, flow: CtrlFlow<Self>) -> Pin<Box<dyn Stream<Item = Self::Delta> + Send + 'static>>;
 }
 
-/// The main entry point for the API. An instance of this type manages the control-flow graph and ensures that there are no cycles.
 #[derive(Debug, SmartDefault)]
-pub struct CtrlFlow<I: NodeId> {
+struct CtrlFlowInner<I: NodeId> {
     /// A graph of the “depends on” relation between control flow nodes.
     #[default(DiGraph::new())]
     graph: DiGraph<I, ()>,
     indices: HashMap<I, NodeIndex>,
     state_deltas: HashMap<I, StateDelta<I::Delta>>
 }
+
+/// The main entry point for the API. An instance of this type manages the control-flow graph and ensures that there are no cycles.
+#[derive(Debug, Default, Clone)]
+pub struct CtrlFlow<I: NodeId>(Arc<Mutex<CtrlFlowInner<I>>>);
 
 impl<I: NodeId> CtrlFlow<I> {
     /// Requests a copy of the data stream for the given node.
@@ -261,13 +264,14 @@ impl<I: NodeId> CtrlFlow<I> {
     /// # Panics
     ///
     /// The returned stream panics if `nid` doesn't produce values of type `T`.
-    pub async fn get_ext<T: Delta + TryFrom<I::Delta>>(&mut self, nid: I) -> StateDelta<T>
+    pub async fn get_ext<T: Delta + TryFrom<I::Delta>>(&self, nid: I) -> StateDelta<T>
     where <T as TryFrom<I::Delta>>::Error: fmt::Debug {
-        let sd = if let Some(sd) = self.state_deltas.get(&nid) {
+        let mut inner = self.0.lock().await;
+        let sd = if let Some(sd) = inner.state_deltas.get(&nid) {
             sd.clone()
         } else {
-            let sd = StateDelta::new(nid.stream());
-            self.state_deltas.insert(nid, sd.clone());
+            let sd = StateDelta::new(nid.stream(self.clone()));
+            inner.state_deltas.insert(nid, sd.clone());
             sd
         };
         sd.try_into().await
@@ -286,38 +290,41 @@ impl<I: NodeId> CtrlFlow<I> {
     /// # Panics
     ///
     /// The returned stream panics if `nid` doesn't produce values of type `T`.
-    pub async fn get_int<T: Delta + TryFrom<I::Delta>>(&mut self, from: I, nid: I) -> Result<StateDelta<T>, Vec<I>>
+    pub async fn get_int<T: Delta + TryFrom<I::Delta>>(&self, from: I, nid: I) -> Result<StateDelta<T>, Vec<I>>
     where <T as TryFrom<I::Delta>>::Error: fmt::Debug {
-        let nid_ix = if let Some(&nid_ix) = self.indices.get(&nid) {
-            if let Some(&from_ix) = self.indices.get(&from) {
-                if let Some((_, path)) = astar(&self.graph, nid_ix, |ix| ix == from_ix, |_| 1, |_| 0) {
-                    // A directed path from `nid` to `from` already exists, so adding an edge from `from` to `nid` would create a cycle.
-                    return Err(path
-                        .into_iter()
-                        .map(|ix1| self.indices
-                            .iter()
-                            .filter_map(|(nid, &ix2)| if ix1 == ix2 { Some(nid.clone()) } else { None })
-                            .exactly_one()
-                            .expect("cycle path contains unknown nodes")
-                        )
-                        .collect()
-                    );
+        {
+            let mut inner = self.0.lock().await;
+            let nid_ix = if let Some(&nid_ix) = inner.indices.get(&nid) {
+                if let Some(&from_ix) = inner.indices.get(&from) {
+                    if let Some((_, path)) = astar(&inner.graph, nid_ix, |ix| ix == from_ix, |_| 1, |_| 0) {
+                        // A directed path from `nid` to `from` already exists, so adding an edge from `from` to `nid` would create a cycle.
+                        return Err(path
+                            .into_iter()
+                            .map(|ix1| inner.indices
+                                .iter()
+                                .filter_map(|(nid, &ix2)| if ix1 == ix2 { Some(nid.clone()) } else { None })
+                                .exactly_one()
+                                .expect("cycle path contains unknown nodes")
+                            )
+                            .collect()
+                        );
+                    }
                 }
-            }
-            nid_ix
-        } else {
-            let nid_ix = self.graph.add_node(nid.clone());
-            self.indices.insert(nid.clone(), nid_ix);
-            nid_ix
-        };
-        let from_ix = if let Some(&from_ix) = self.indices.get(&from) {
-            from_ix
-        } else {
-            let from_ix = self.graph.add_node(from.clone());
-            self.indices.insert(from, from_ix);
-            from_ix
-        };
-        self.graph.add_edge(nid_ix, from_ix, ());
+                nid_ix
+            } else {
+                let nid_ix = inner.graph.add_node(nid.clone());
+                inner.indices.insert(nid.clone(), nid_ix);
+                nid_ix
+            };
+            let from_ix = if let Some(&from_ix) = inner.indices.get(&from) {
+                from_ix
+            } else {
+                let from_ix = inner.graph.add_node(from.clone());
+                inner.indices.insert(from, from_ix);
+                from_ix
+            };
+            inner.graph.add_edge(nid_ix, from_ix, ());
+        }
         Ok(self.get_ext::<T>(nid).await)
     }
 }
