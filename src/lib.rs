@@ -364,14 +364,13 @@ impl<D: Delta> StateDelta<D> {
     }
 
     /// Returns a stream that yields this state as it is updated.
-    pub fn states(&self) -> impl Stream<Item = D::State> + '_ {
-        stream::once(self.stream()).then(|deltas| async {
-            stream::unfold((deltas, None), |(mut deltas, mut state)| async {
-                let delta = deltas.next().await?;
-                delta.update(&mut state).expect("failed to update state with delta");
-                Some((state.clone().expect("empty state after Delta::update"), (deltas, state)))
-            })
-        }).flatten()
+    pub async fn states(&self) -> impl Stream<Item = D::State> {
+        let deltas = self.stream().await;
+        stream::unfold((deltas, None), |(mut deltas, mut state)| async {
+            let delta = deltas.next().await?;
+            delta.update(&mut state).expect("failed to update state with delta");
+            Some((state.clone().expect("empty state after Delta::update"), (deltas, state)))
+        })
     }
 
     /// The first item of this stream is guaranteed to be an “initial state” delta.
