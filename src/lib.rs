@@ -80,7 +80,7 @@ use tokio::{
                 }
             }
 
-            impl TryFrom<DeltaWrap> for $Delta {
+            impl ::std::convert::TryFrom<DeltaWrap> for $Delta {
                 type Error = ();
 
                 fn try_from(wrap: DeltaWrap) -> Result<$Delta, ()> {
