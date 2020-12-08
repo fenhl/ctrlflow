@@ -8,11 +8,6 @@
 
 #![recursion_limit = "256"] // for stream!
 
-#[cfg(all(feature = "async-std", feature = "tokio"))]
-compile_error!("Features async-std and tokio are mutually exclusive.");
-#[cfg(not(any(feature = "async-std", feature = "tokio")))]
-compile_error!("Either the async-std feature or the tokio feature must be enabled.");
-
 use {
     std::{
         collections::HashMap,
@@ -20,7 +15,7 @@ use {
         fmt,
         hash::Hash,
         pin::Pin,
-        sync::Arc
+        sync::Arc,
     },
     futures::prelude::*,
     itertools::Itertools as _,
@@ -28,33 +23,25 @@ use {
         algo::astar,
         graph::{
             DiGraph,
-            NodeIndex
-        }
+            NodeIndex,
+        },
     },
-    smart_default::SmartDefault
-};
-#[cfg(feature = "async-std")]
-use async_std::{
-    sync::{
-        Mutex,
-        Receiver,
-        Sender,
-        channel
+    smart_default::SmartDefault,
+    tokio::{
+        sync::{
+            Mutex,
+            mpsc::{
+                Receiver,
+                Sender,
+                channel,
+            },
+        },
+        task,
     },
-    task
 };
-#[cfg(feature = "tokio")]
-use tokio::{
-    sync::{
-        Mutex,
-        mpsc::{
-            Receiver,
-            Sender,
-            channel
-        }
-    },
-    task
-};
+
+#[cfg(feature = "fs")]
+pub mod fs;
 
 /// Generates a `NodeId` enum that can yield different types of deltas depending on the variant.
 #[macro_export] macro_rules! ctrlflow {
@@ -62,15 +49,15 @@ use tokio::{
         #[derive(Debug, Clone)]
         enum StateWrap {
             $(
-                $NodeKind(<$Delta as $crate::Delta>::State)
-            ),*
+                $NodeKind(<$Delta as $crate::Delta>::State),
+            )*
         }
 
         #[derive(Debug, Clone)]
         enum DeltaWrap {
             $(
-                $NodeKind($Delta)
-            ),*
+                $NodeKind($Delta),
+            )*
         }
 
         $(
@@ -86,7 +73,7 @@ use tokio::{
                 fn try_from(wrap: DeltaWrap) -> Result<$Delta, ()> {
                     match wrap {
                         DeltaWrap::$NodeKind(inner) => Ok(inner),
-                        #[allow(unreachable_patterns)] _ => Err(())
+                        #[allow(unreachable_patterns)] _ => Err(()),
                     }
                 }
             }
@@ -98,24 +85,24 @@ use tokio::{
             fn from_initial_state(state: StateWrap) -> DeltaWrap {
                 match state {
                     $(
-                        StateWrap::$NodeKind(inner) => DeltaWrap::$NodeKind(<$Delta as $crate::Delta>::from_initial_state(inner))
-                    ),*
+                        StateWrap::$NodeKind(inner) => DeltaWrap::$NodeKind(<$Delta as $crate::Delta>::from_initial_state(inner)),
+                    )*
                 }
             }
 
             fn initial_state(self) -> Option<StateWrap> {
                 match self {
                     $(
-                        DeltaWrap::$NodeKind(inner) => inner.initial_state().map(StateWrap::$NodeKind)
-                    ),*
+                        DeltaWrap::$NodeKind(inner) => inner.initial_state().map(StateWrap::$NodeKind),
+                    )*
                 }
             }
 
             fn kind(&self) -> &'static str {
                 match self {
                     $(
-                        DeltaWrap::$NodeKind(_) => stringify!($NodeKind)
-                    ),*
+                        DeltaWrap::$NodeKind(_) => stringify!($NodeKind),
+                    )*
                 }
             }
 
@@ -127,8 +114,8 @@ use tokio::{
                             delta.update_inner(state);
                         } else {
                             panic!("expected delta of kind {}", kind);
-                        }
-                    ),*
+                        },
+                    )*
                 }
             }
         }
@@ -136,18 +123,20 @@ use tokio::{
         #[derive(Debug, Clone, PartialEq, Eq, Hash)]
         enum NodeId {
             $(
-                $NodeKind($InnerId)
-            ),*
+                $NodeKind($InnerId),
+            )*
         }
 
         impl $crate::NodeId for NodeId {
             type Delta = DeltaWrap;
 
-            fn stream(&self, flow: CtrlFlow<NodeId>) -> Pin<Box<dyn Stream<Item = DeltaWrap> + Send + 'static>> {
+            fn stream(&self, flow: $crate::CtrlFlow<NodeId>) -> ::std::pin::Pin<Box<dyn ::futures::stream::Stream<Item = DeltaWrap> + Send + 'static>> {
                 match self {
                     $(
-                        NodeId::$NodeKind(inner) => Box::pin($stream(flow, inner.clone()).map(|d| <DeltaWrap as From<$Delta>>::from(d)))
-                    ),*
+                        NodeId::$NodeKind(inner) => Box::pin(
+                            ::futures::stream::StreamExt::map($stream(flow, inner.clone()), |d| <DeltaWrap as From<$Delta>>::from(d))
+                        ),
+                    )*
                 }
             }
         }
@@ -197,7 +186,7 @@ pub trait Delta: fmt::Debug + Clone + Send + Sync + 'static {
         } else if let Some(init) = self.initial_state() {
             *state = Some(init);
         } else {
-            return Err(MissingInitialState(kind));
+            return Err(MissingInitialState(kind))
         }
         Ok(())
     }
@@ -225,7 +214,7 @@ impl<D: Delta, E: fmt::Debug + Clone + Send + Sync + 'static> Delta for Result<D
     fn update_inner(self, state: &mut Result<D::State, E>) {
         if let Ok(s) = state {
             match self {
-                Ok(d) => { d.update_inner(s); }
+                Ok(d) => d.update_inner(s),
                 Err(e) => { *state = Err(e); }
             }
         }
@@ -247,7 +236,7 @@ struct CtrlFlowInner<I: NodeId> {
     #[default(DiGraph::new())]
     graph: DiGraph<I, ()>,
     indices: HashMap<I, NodeIndex>,
-    state_deltas: HashMap<I, StateDelta<I::Delta>>
+    state_deltas: HashMap<I, StateDelta<I::Delta>>,
 }
 
 /// The main entry point for the API. An instance of this type manages the control-flow graph and ensures that there are no cycles.
@@ -340,12 +329,15 @@ impl<D: Delta> StateDelta<D> {
         task::spawn(async move {
             while let Some(delta) = stream.next().await {
                 let (ref mut state, ref mut txs) = *arc_clone.lock().await;
-                for tx in txs {
-                    #[cfg(feature = "async-std")] tx.send(delta.clone()).await;
-                    #[cfg(feature = "tokio")] if tx.send(delta.clone()).await.is_err() {
+                let mut txs_to_remove = Vec::default();
+                for (idx, tx) in txs.iter_mut().enumerate() {
+                    if tx.send(delta.clone()).await.is_err() {
                         // no longer listening
-                        //TODO remove `tx` from `txs`
+                        txs_to_remove.push(idx);
                     }
+                }
+                for idx in txs_to_remove.into_iter().rev() {
+                    txs.swap_remove(idx);
                 }
                 delta.update(state).expect("delta is non-init but state is None");
             }
@@ -357,7 +349,7 @@ impl<D: Delta> StateDelta<D> {
     pub async fn state(&self) -> D::State {
         {
             let opt_state = &self.0.lock().await.0;
-            if let Some(state) = opt_state { return state.clone(); }
+            if let Some(state) = opt_state { return state.clone() }
         }
         let _ = self.stream().await.next().await;
         self.0.lock().await.0.clone().expect("state empty after initial state event")
@@ -378,8 +370,7 @@ impl<D: Delta> StateDelta<D> {
         let (ref state, ref mut txs) = *self.0.lock().await;
         #[allow(unused_mut)] let (mut tx, rx) = channel(1_024); // usize::MAX causes a “assertion failed: permits <= MAX_PERMITS” panic
         if let Some(state) = state {
-            #[cfg(feature = "async-std")] tx.send(D::from_initial_state(state.clone())).await;
-            #[cfg(feature = "tokio")] tx.send(D::from_initial_state(state.clone())).await.expect("rx is still in scope");
+            tx.send(D::from_initial_state(state.clone())).await.expect("rx is still in scope");
         }
         txs.push(tx);
         rx
