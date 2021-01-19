@@ -45,7 +45,7 @@ pub mod fs;
 
 /// Generates a `NodeId` enum that can yield different types of deltas depending on the variant.
 #[macro_export] macro_rules! ctrlflow {
-    ($($NodeKind:ident($InnerId:ty, $Delta:ty) => $stream:expr),*,?) => {
+    ($($NodeKind:ident($InnerId:ty, $Delta:ty) => $stream:expr),*$(,)?) => {
         #[derive(Debug, Clone)]
         enum StateWrap {
             $(
