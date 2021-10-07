@@ -1,386 +1,185 @@
-//! This crate provides a handler for dependency-based asynchronous control flow.
-//!
-//! It assumes you have several interdependent units of changing state, which are modeled as nodes in a control flow graph. Nodes could be the contents of a file, the current time, etc.
-//!
-//! A control flow graph is represented by the type `CtrlFlow`, whose `get_ext` method is used to query the state of a node (starting its computation if necessary).
-
-#![deny(missing_docs, rust_2018_idioms, unused, unused_import_braces, unused_qualifications, warnings)]
-
-#![recursion_limit = "256"] // for stream!
+#![deny(rust_2018_idioms, unused, unused_crate_dependencies, unused_import_braces, unused_qualifications, warnings)]
+#![forbid(unsafe_code)]
 
 use {
     std::{
-        collections::HashMap,
-        convert::TryFrom,
-        fmt,
+        collections::{
+            HashMap,
+            hash_map,
+        },
         hash::Hash,
+        marker::PhantomData,
         pin::Pin,
         sync::Arc,
     },
-    futures::prelude::*,
-    itertools::Itertools as _,
-    petgraph::{
-        algo::astar,
-        graph::{
-            DiGraph,
-            NodeIndex,
+    async_stream::stream,
+    derivative::Derivative,
+    futures::{
+        future::Future,
+        stream::{
+            Stream,
+            StreamExt as _,
         },
     },
-    smart_default::SmartDefault,
-    tokio::{
-        sync::{
-            Mutex,
-            mpsc::{
-                Receiver,
-                Sender,
-                channel,
-            },
-        },
-        task,
+    tokio::sync::{
+        Mutex,
+        RwLockReadGuard,
+        broadcast,
+        oneshot,
     },
+    typemap_rev::{
+        TypeMap,
+        TypeMapKey,
+    },
+    crate::rw_future::RwFuture,
 };
 
-#[cfg(feature = "fs")]
-pub mod fs;
+#[cfg(feature = "fs")] pub mod fs;
+mod rw_future;
+pub mod util;
 
-/// Generates a `NodeId` enum that can yield different types of deltas depending on the variant.
-#[macro_export] macro_rules! ctrlflow {
-    ($($NodeKind:ident($InnerId:ty, $Delta:ty) => $stream:expr),*$(,)?) => {
-        #[derive(Debug, Clone)]
-        enum StateWrap {
-            $(
-                $NodeKind(<$Delta as $crate::Delta>::State),
-            )*
-        }
+pub trait Delta<S>: Clone + Send + Sync + 'static {
+    fn apply(&self, state: &mut S);
+}
 
-        #[derive(Debug, Clone)]
-        enum DeltaWrap {
-            $(
-                $NodeKind($Delta),
-            )*
-        }
+impl<T: Clone + Send + Sync + 'static> Delta<T> for T {
+    fn apply(&self, state: &mut T) {
+        *state = self.clone();
+    }
+}
 
-        $(
-            impl From<$Delta> for DeltaWrap {
-                fn from(inner: $Delta) -> DeltaWrap {
-                    DeltaWrap::$NodeKind(inner)
-                }
-            }
+pub trait Key: Clone + Eq + Hash + Send + Sync + Sized + 'static {
+    type State: Send + Sync;
+    type Delta: Delta<Self::State>;
 
-            impl ::std::convert::TryFrom<DeltaWrap> for $Delta {
-                type Error = ();
+    /// Returns an initial state of this node, as well as a stream with all changes from that point.
+    fn maintain(self, runner: RunnerInternal) -> Pin<Box<dyn Future<Output = (Self::State, Pin<Box<dyn Stream<Item = Self::Delta> + Send>>)> + Send>>;
+}
 
-                fn try_from(wrap: DeltaWrap) -> Result<$Delta, ()> {
-                    match wrap {
-                        DeltaWrap::$NodeKind(inner) => Ok(inner),
-                        #[allow(unreachable_patterns)] _ => Err(()),
+struct HandleMapKey<K: Key>(PhantomData<K>);
+
+impl<K: Key> TypeMapKey for HandleMapKey<K> {
+    type Value = HashMap<K, Handle<K>>;
+}
+
+/// A handle to a node whose state is being maintained by a `Runner`.
+#[derive(Derivative)]
+#[derivative(Debug(bound = ""))]
+pub struct Handle<K: Key> {
+    state: RwFuture<(K::State, broadcast::Sender<K::Delta>)>,
+}
+
+impl<K: Key> Handle<K> {
+    /// Returns the current state of this node.
+    pub async fn state(&self) -> RwLockReadGuard<'_, K::State> {
+        RwLockReadGuard::map(self.state.read().await, |(state, _)| state)
+    }
+
+    /// Returns the current state of this node, as well as a stream with all changes from that point.
+    pub async fn stream(&self) -> (RwLockReadGuard<'_, K::State>, broadcast::Receiver<K::Delta>) {
+        let read_guard = self.state.read().await;
+        let receiver = read_guard.1.subscribe();
+        (RwLockReadGuard::map(read_guard, |(state, _)| state), receiver)
+    }
+
+    /// Returns a stream that yields the current state of this node at the start of the stream, as well as the state of this node after each change.
+    ///
+    /// Note that some states may be skipped if the underlying deltas channel lags.
+    pub fn states(&self) -> impl Stream<Item = K::State> + '_
+    where K::State: Clone + Unpin {
+        stream! {
+            let (init, mut deltas) = self.stream().await;
+            let mut state = init.clone();
+            yield state.clone();
+            loop {
+                match deltas.recv().await {
+                    Ok(delta) => {
+                        delta.apply(&mut state);
+                        yield state.clone();
                     }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 }
-            }
-        )*
-
-        impl $crate::Delta for DeltaWrap {
-            type State = StateWrap;
-
-            fn from_initial_state(state: StateWrap) -> DeltaWrap {
-                match state {
-                    $(
-                        StateWrap::$NodeKind(inner) => DeltaWrap::$NodeKind(<$Delta as $crate::Delta>::from_initial_state(inner)),
-                    )*
-                }
-            }
-
-            fn initial_state(self) -> Option<StateWrap> {
-                match self {
-                    $(
-                        DeltaWrap::$NodeKind(inner) => inner.initial_state().map(StateWrap::$NodeKind),
-                    )*
-                }
-            }
-
-            fn kind(&self) -> &'static str {
-                match self {
-                    $(
-                        DeltaWrap::$NodeKind(_) => stringify!($NodeKind),
-                    )*
-                }
-            }
-
-            fn update_inner(self, state: &mut StateWrap) {
-                let kind = self.kind();
-                #[allow(irrefutable_let_patterns)] match self {
-                    $(
-                        DeltaWrap::$NodeKind(delta) => if let StateWrap::$NodeKind(state) = state {
-                            delta.update_inner(state);
-                        } else {
-                            panic!("expected delta of kind {}", kind);
-                        },
-                    )*
-                }
-            }
-        }
-
-        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-        enum NodeId {
-            $(
-                $NodeKind($InnerId),
-            )*
-        }
-
-        impl $crate::NodeId for NodeId {
-            type Delta = DeltaWrap;
-
-            fn stream(&self, flow: $crate::CtrlFlow<NodeId>) -> ::std::pin::Pin<Box<dyn ::futures::stream::Stream<Item = DeltaWrap> + Send + 'static>> {
-                match self {
-                    $(
-                        NodeId::$NodeKind(inner) => Box::pin(
-                            ::futures::stream::StreamExt::map($stream(flow, inner.clone()), |d| <DeltaWrap as From<$Delta>>::from(d))
-                        ),
-                    )*
-                }
-            }
-        }
-    };
-}
-
-/// An error returned by `Delta::update`.
-#[derive(Debug, Clone, Copy)]
-pub struct MissingInitialState(&'static str);
-
-/// A type implementing this trait represents a change to a node's state.
-pub trait Delta: fmt::Debug + Clone + Send + Sync + 'static {
-    /// The state which this delta modifies.
-    type State: fmt::Debug + Clone + Send;
-
-    /// Returns the “initial state” event corresponding to the given state.
-    ///
-    /// # Correctness
-    ///
-    /// ```rust
-    /// Delta::from_initial_state(init).initial_state() == Some(init)
-    /// ```
-    fn from_initial_state(init: Self::State) -> Self;
-
-    /// Returns the initial state if this is an “initial state” event.
-    ///
-    /// # Correctness
-    ///
-    /// The first `Delta` in a stream should always return `Some` here.
-    fn initial_state(self) -> Option<Self::State>;
-
-    /// A brief representation of the kind of event this delta represents, used for `Debug` in `MissingInitialState`. Usually corresponds to the enum discriminant if `Self` is an enum.
-    fn kind(&self) -> &'static str;
-
-    /// Called by `update` if the `state` is already initialized.
-    fn update_inner(self, state: &mut Self::State);
-
-    /// Apply this `Delta` to the given `state`.
-    ///
-    /// # Errors
-    ///
-    /// If `state` is `None` and `self.initial_state()` returns `None`, the stream is malformed and an error is returned.
-    fn update(self, state: &mut Option<Self::State>) -> Result<(), MissingInitialState> {
-        let kind = self.kind();
-        if let Some(state) = state {
-            self.update_inner(state);
-        } else if let Some(init) = self.initial_state() {
-            *state = Some(init);
-        } else {
-            return Err(MissingInitialState(kind))
-        }
-        Ok(())
-    }
-}
-
-impl<D: Delta, E: fmt::Debug + Clone + Send + Sync + 'static> Delta for Result<D, E> {
-    type State = Result<D::State, E>;
-
-    fn from_initial_state(init: Result<D::State, E>) -> Result<D, E> {
-        init.map(D::from_initial_state)
-    }
-
-    fn initial_state(self) -> Option<Result<D::State, E>> {
-        self.map(D::initial_state).transpose()
-    }
-
-    fn kind(&self) -> &'static str {
-        if let Ok(d) = self {
-            d.kind()
-        } else {
-            "error"
-        }
-    }
-
-    fn update_inner(self, state: &mut Result<D::State, E>) {
-        if let Ok(s) = state {
-            match self {
-                Ok(d) => d.update_inner(s),
-                Err(e) => { *state = Err(e); }
             }
         }
     }
 }
 
-/// A type implementing this trait describes the nodes of a control flow graph.
-pub trait NodeId: fmt::Debug + Clone + Eq + Hash {
-    /// The type yielded by streams of nodes of this type.
-    type Delta: Delta;
-
-    /// Contains the logic for this node.
-    fn stream(&self, flow: CtrlFlow<Self>) -> Pin<Box<dyn Stream<Item = Self::Delta> + Send + 'static>>;
-}
-
-#[derive(Debug, SmartDefault)]
-struct CtrlFlowInner<I: NodeId> {
-    /// A graph of the “depends on” relation between control flow nodes.
-    #[default(DiGraph::new())]
-    graph: DiGraph<I, ()>,
-    indices: HashMap<I, NodeIndex>,
-    state_deltas: HashMap<I, StateDelta<I::Delta>>,
-}
-
-/// The main entry point for the API. An instance of this type manages the control-flow graph and ensures that there are no cycles.
-#[derive(Debug, SmartDefault, Clone)]
-pub struct CtrlFlow<I: NodeId>(Arc<Mutex<CtrlFlowInner<I>>>);
-
-impl<I: NodeId> CtrlFlow<I> {
-    /// Requests a copy of the data stream for the given node.
-    ///
-    /// # Correctness
-    ///
-    /// This method must only be called from outside the graph represented by this `CtrlFlow`. Stream implementations for `DepId` should use `get_int` instead.
-    ///
-    /// # Panics
-    ///
-    /// The returned stream panics if `nid` doesn't produce values of type `T`.
-    pub async fn get_ext<T: Delta + TryFrom<I::Delta>>(&self, nid: I) -> StateDelta<T>
-    where <T as TryFrom<I::Delta>>::Error: fmt::Debug {
-        let mut inner = self.0.lock().await;
-        let sd = if let Some(sd) = inner.state_deltas.get(&nid) {
-            sd.clone()
-        } else {
-            let sd = StateDelta::new(nid.stream(self.clone()));
-            inner.state_deltas.insert(nid, sd.clone());
-            sd
-        };
-        sd.try_into().await
+// manually implemented to not require K::State: Clone
+impl<K: Key> Clone for Handle<K> {
+    fn clone(&self) -> Handle<K> {
+        Handle { state: self.state.clone() }
     }
+}
 
-    /// Requests a copy of the data stream for the given node.
-    ///
-    /// # Correctness
-    ///
-    /// This method must only be called from inside the graph represented by this `CtrlFlow`. The `from` parameter must be the ID of the calling node.
-    ///
-    /// # Errors
-    ///
-    /// If adding this dependency would result in a dependency loop, an error is returned containing the dependency path from `nid` to `from`.
-    ///
-    /// # Panics
-    ///
-    /// The returned stream panics if `nid` doesn't produce values of type `T`.
-    pub async fn get_int<T: Delta + TryFrom<I::Delta>>(&self, from: I, nid: I) -> Result<StateDelta<T>, Vec<I>>
-    where <T as TryFrom<I::Delta>>::Error: fmt::Debug {
-        {
-            let mut inner = self.0.lock().await;
-            let nid_ix = if let Some(&nid_ix) = inner.indices.get(&nid) {
-                if let Some(&from_ix) = inner.indices.get(&from) {
-                    if let Some((_, path)) = astar(&inner.graph, nid_ix, |ix| ix == from_ix, |_| 1, |_| 0) {
-                        // A directed path from `nid` to `from` already exists, so adding an edge from `from` to `nid` would create a cycle.
-                        return Err(path
-                            .into_iter()
-                            .map(|ix1| inner.indices
-                                .iter()
-                                .filter_map(|(nid, &ix2)| if ix1 == ix2 { Some(nid.clone()) } else { None })
-                                .exactly_one()
-                                .expect("cycle path contains unknown nodes")
-                            )
-                            .collect()
-                        );
+#[derive(Debug)]
+pub struct DependencyLoop;
+
+/// An internal handle to a runner passed to the [`Key::maintain`] method.
+///
+/// Nodes subscribed to from here will be tracked as internal dependencies.
+pub struct RunnerInternal {
+    runner: Runner,
+}
+
+impl RunnerInternal {
+    pub async fn subscribe<K: Key>(&self, key: K) -> Result<Handle<K>, DependencyLoop> {
+        //TODO check for dependency loops
+        Ok(self.runner.subscribe(key).await)
+    }
+}
+
+#[derive(Clone)]
+pub struct Runner {
+    map: Arc<Mutex<TypeMap>>,
+}
+
+impl Runner {
+    pub async fn subscribe<K: Key>(&self, key: K) -> Handle<K> {
+        match self.map.lock().await.entry::<HandleMapKey<K>>().or_default().entry(key.clone()) {
+            hash_map::Entry::Occupied(entry) => entry.get().clone(),
+            hash_map::Entry::Vacant(entry) => {
+                let runner = RunnerInternal { runner: self.clone() };
+                let (state_tx, state_rx) = oneshot::channel();
+                let (stream_tx, stream_rx) = oneshot::channel();
+                tokio::spawn(async move {
+                    let (state, stream) = key.maintain(runner).await;
+                    let _ = state_tx.send(state);
+                    let _ = stream_tx.send(stream);
+                });
+                let (sender, _) = broadcast::channel(1_024); // usize::MAX causes a “assertion failed: permits <= MAX_PERMITS” panic
+                let state = RwFuture::new(async move {
+                    (state_rx.await.expect("no state was sent"), sender)
+                });
+                let state_clone = state.clone();
+                tokio::spawn(async move {
+                    let mut stream = stream_rx.await.expect("no stream was sent");
+                    while let Some(delta) = stream.next().await {
+                        let mut write_guard = state_clone.write().await;
+                        delta.apply(&mut write_guard.0);
+                        if write_guard.1.send(delta).is_err() { break }
                     }
-                }
-                nid_ix
-            } else {
-                let nid_ix = inner.graph.add_node(nid.clone());
-                inner.indices.insert(nid.clone(), nid_ix);
-                nid_ix
-            };
-            let from_ix = if let Some(&from_ix) = inner.indices.get(&from) {
-                from_ix
-            } else {
-                let from_ix = inner.graph.add_node(from.clone());
-                inner.indices.insert(from, from_ix);
-                from_ix
-            };
-            inner.graph.add_edge(nid_ix, from_ix, ());
+                });
+                let handle = Handle { state };
+                entry.insert(handle.clone());
+                handle
+            }
         }
-        Ok(self.get_ext::<T>(nid).await)
     }
 }
 
-/// This type facilitates subscribing to a node's state.
-#[derive(Debug, Clone)]
-pub struct StateDelta<D: Delta>(Arc<Mutex<(Option<D::State>, Vec<Sender<D>>)>>);
-
-impl<D: Delta> StateDelta<D> {
-    fn new(mut stream: impl Stream<Item = D> + Send + Unpin + 'static) -> StateDelta<D> {
-        let arc = Arc::<Mutex<(Option<_>, Vec<Sender<_>>)>>::default();
-        let arc_clone = Arc::clone(&arc);
-        task::spawn(async move {
-            while let Some(delta) = stream.next().await {
-                let (ref mut state, ref mut txs) = *arc_clone.lock().await;
-                let mut txs_to_remove = Vec::default();
-                for (idx, tx) in txs.iter_mut().enumerate() {
-                    if tx.send(delta.clone()).await.is_err() {
-                        // no longer listening
-                        txs_to_remove.push(idx);
-                    }
-                }
-                for idx in txs_to_remove.into_iter().rev() {
-                    txs.swap_remove(idx);
-                }
-                delta.update(state).expect("delta is non-init but state is None");
-            }
-        });
-        StateDelta(arc)
-    }
-
-    /// Returns the current state, potentially waiting for initialization.
-    pub async fn state(&self) -> D::State {
-        {
-            let opt_state = &self.0.lock().await.0;
-            if let Some(state) = opt_state { return state.clone() }
+impl Default for Runner {
+    fn default() -> Runner {
+        Runner {
+            map: Arc::new(Mutex::new(TypeMap::new())),
         }
-        let _ = self.stream().await.next().await;
-        self.0.lock().await.0.clone().expect("state empty after initial state event")
     }
+}
 
-    /// Returns a stream that yields this state as it is updated.
-    pub async fn states(&self) -> impl Stream<Item = D::State> {
-        let deltas = self.stream().await;
-        stream::unfold((deltas, None), |(mut deltas, mut state)| async {
-            let delta = deltas.next().await?;
-            delta.update(&mut state).expect("failed to update state with delta");
-            Some((state.clone().expect("empty state after Delta::update"), (deltas, state)))
-        })
-    }
-
-    /// The first item of this stream is guaranteed to be an “initial state” delta.
-    pub async fn stream(&self) -> Receiver<D> {
-        let (ref state, ref mut txs) = *self.0.lock().await;
-        #[allow(unused_mut)] let (mut tx, rx) = channel(1_024); // usize::MAX causes a “assertion failed: permits <= MAX_PERMITS” panic
-        if let Some(state) = state {
-            tx.send(D::from_initial_state(state.clone())).await.expect("rx is still in scope");
-        }
-        txs.push(tx);
-        rx
-    }
-
-    async fn try_into<T: Delta + TryFrom<D>>(self) -> StateDelta<T>
-    where <T as TryFrom<D>>::Error: fmt::Debug {
-        let stream = self.stream().await.map(|x|
-            T::try_from(x).expect("cannot convert delta")
-        );
-        StateDelta::new(stream)
-    }
+/// Starts keeping the state for this node up to date in the background.
+///
+/// If you need the state of multiple nodes, you should instead create a [`Runner`] and use its [`subscribe`](Runner::subscribe) method for each node you need.
+/// This avoids redundant copies of shared dependencies of the nodes.
+pub async fn run<K: Key>(key: K) -> Handle<K> {
+    Runner::default().subscribe(key).await
 }

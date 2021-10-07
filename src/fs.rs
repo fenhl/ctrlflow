@@ -7,8 +7,10 @@ use {
         fmt,
         io,
         path::PathBuf,
+        pin::Pin,
         sync::Arc,
     },
+    derive_more::From,
     futures::{
         prelude::*,
         stream,
@@ -18,28 +20,116 @@ use {
         Inotify,
         WatchMask,
     },
-    tokio::{
-        fs::{
-            self,
-            File,
-        },
-        prelude::*,
+    tokio::fs,
+    tokio_stream::wrappers::{
+        BroadcastStream,
+        ReadDirStream,
+        errors::BroadcastStreamRecvError,
     },
     crate::{
-        CtrlFlow,
         Delta,
-        NodeId,
+        Key,
+        RunnerInternal,
     },
 };
 
-/// Helper trait for getting the node ID for a given file or directory.
-pub trait NodeIdExt {
-    /// Returns the node ID for this directory.
-    fn dir(path: PathBuf) -> Self;
+/// A `Key` for watching the contents of a directory.
+#[derive(Debug, From, Clone, PartialEq, Eq, Hash)]
+pub struct Dir(pub PathBuf);
 
-    /// Returns the node ID for this file.
-    fn file(path: PathBuf) -> Self;
+impl Key for Dir {
+    type State = Result<HashSet<OsString>, Arc<io::Error>>;
+    type Delta = Result<inotify::EventOwned, Arc<io::Error>>;
+
+    fn maintain(self, _: RunnerInternal) -> Pin<Box<dyn Future<Output = (Result<HashSet<OsString>, Arc<io::Error>>, Pin<Box<dyn Stream<Item = Result<inotify::EventOwned, Arc<io::Error>>> + Send>>)> + Send>> {
+        Box::pin(async move {
+            let mut watcher = match Inotify::init() {
+                Ok(watcher) => watcher,
+                Err(e) => return (Err(Arc::new(e)), Box::pin(stream::empty()) as Pin<Box<dyn Stream<Item = _> + Send + 'static>>),
+            };
+            if let Err(e) = watcher.add_watch(&self.0, WatchMask::ATTRIB | WatchMask::CLOSE_WRITE | WatchMask::CREATE | WatchMask::DELETE | WatchMask::DELETE_SELF | WatchMask::MOVE | WatchMask::MOVE_SELF) {
+                return (Err(Arc::new(e)), Box::pin(stream::empty()) as Pin<Box<dyn Stream<Item = _> + Send + 'static>>)
+            }
+            let read_dir = match fs::read_dir(self.0).await {
+                Ok(read_dir) => ReadDirStream::new(read_dir),
+                Err(e) => return (Err(Arc::new(e)), Box::pin(stream::empty()) as Pin<Box<dyn Stream<Item = _> + Send + 'static>>),
+            };
+            (
+                read_dir.map_ok(|entry| entry.file_name()).try_collect().await.map_err(Arc::new),
+                Box::pin(stream::once(async move { watcher.event_stream(Vec::default()) }).try_flatten().map_err(Arc::new)),
+            )
+        })
+    }
 }
+
+/// A `Key` for watching the contents of a regular file.
+#[derive(Debug, From, Clone, PartialEq, Eq, Hash)]
+pub struct File(pub PathBuf);
+
+impl Key for File {
+    type State = Result<Option<Vec<u8>>, Arc<io::Error>>;
+    type Delta = Result<Option<Vec<u8>>, Arc<io::Error>>;
+
+    fn maintain(self, runner: RunnerInternal) -> Pin<Box<dyn Future<Output = (Result<Option<Vec<u8>>, Arc<io::Error>>, Pin<Box<dyn Stream<Item = Result<Option<Vec<u8>>, Arc<io::Error>>> + Send>>)> + Send>> {
+        let path = self.0.clone();
+        let name = self.0.file_name().expect("watched file has no name").to_owned();
+        Box::pin(async move {
+            let parent = path.parent().expect("file has no parent").to_owned();
+            let parent_handle = runner.subscribe(Dir(parent)).await.expect("dependency loop");
+            let (parent_state, parent_stream) = parent_handle.stream().await;
+            (
+                match *parent_state {
+                    Ok(ref names) => if names.contains(&name) {
+                        match fs::read(&path).await {
+                            Ok(buf) => Ok(Some(buf)),
+                            Err(e) => Err(Arc::new(e)),
+                        }
+                    } else {
+                        Ok(None)
+                    },
+                    Err(ref e) => Err(Arc::clone(e)),
+                },
+                BroadcastStream::new(parent_stream)
+                    .map_err(|e| match e {
+                        BroadcastStreamRecvError::Lagged(skipped_msgs) => Arc::new(io::Error::new(io::ErrorKind::Other, BroadcastLaggedError(skipped_msgs))),
+                    })
+                    .try_filter_map(move |evt| {
+                        let name = name.clone();
+                        async move {
+                            let evt = evt.as_ref().map_err(Arc::clone)?;
+                            Ok(match evt.mask {
+                                EventMask::ATTRIB | EventMask::CLOSE_WRITE | EventMask::CREATE | EventMask::MOVED_TO => if evt.name.as_ref().map_or(false, |evt_name| name == *evt_name) { Some(true) } else { None },
+                                EventMask::DELETE_SELF | EventMask::MOVE_SELF => if evt.name.as_ref().map_or(false, |evt_name| name == *evt_name) { Some(false) } else { None },
+                                _ => None,
+                            })
+                        }
+                    })
+                    .and_then(move |exists| {
+                        let path = path.clone();
+                        async move {
+                            Ok(if exists {
+                                Some(fs::read(&path).await?)
+                            } else {
+                                None
+                            })
+                        }
+                    })
+                    .boxed(),
+            )
+        })
+    }
+}
+
+#[derive(Debug)]
+struct BroadcastLaggedError(u64);
+
+impl fmt::Display for BroadcastLaggedError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "broadcast receiver lagged behind and skipped {} messages", self.0)
+    }
+}
+
+impl std::error::Error for BroadcastLaggedError {}
 
 #[derive(Debug)]
 struct InotifyDeleteSelfError;
@@ -74,143 +164,27 @@ impl fmt::Display for InotifyNameError {
 
 impl std::error::Error for InotifyNameError {}
 
-/// A change to the contents of a directory.
-#[derive(Debug, Clone)]
-pub enum DirDelta {
-    /// Generated when the ctrlflow starts watching the directory or when an error occurs.
-    ///
-    /// The success case contains the set of names inside the directory.
-    Init(Result<HashSet<OsString>, Arc<io::Error>>),
-    /// Any other non-error event that occurs after the initial contents of the directory are known.
-    Other(inotify::EventOwned),
-}
-
-impl Delta for DirDelta {
-    type State = Result<HashSet<OsString>, Arc<io::Error>>;
-
-    fn from_initial_state(init: Result<HashSet<OsString>, Arc<io::Error>>) -> DirDelta {
-        DirDelta::Init(init)
-    }
-
-    fn initial_state(self) -> Option<Result<HashSet<OsString>, Arc<io::Error>>> {
-        if let DirDelta::Init(init) = self {
-            Some(init)
-        } else {
-            None
-        }
-    }
-
-    fn kind(&self) -> &'static str {
-        match self {
-            DirDelta::Init(Ok(_)) => "Init",
-            DirDelta::Init(Err(_)) => "Error",
-            DirDelta::Other(_) => "Other",
-        }
-    }
-
-    fn update_inner(self, state_res: &mut Result<HashSet<OsString>, Arc<io::Error>>) {
-        match self {
-            DirDelta::Init(init) => { *state_res = init; }
-            DirDelta::Other(evt) => if let Ok(ref mut state) = state_res {
-                match evt.mask {
+impl Delta<Result<HashSet<OsString>, Arc<io::Error>>> for Result<inotify::EventOwned, Arc<io::Error>> {
+    fn apply(&self, state_res: &mut Result<HashSet<OsString>, Arc<io::Error>>) {
+        if let Ok(state) = state_res {
+            match self {
+                Ok(evt) => match evt.mask {
                     EventMask::ATTRIB | EventMask::CLOSE_WRITE => {} // no changes to the file list (these events are only watched to be picked up by File nodes)
-                    EventMask::CREATE | EventMask::MOVED_TO => if let Some(name) = evt.name {
-                        state.insert(name);
+                    EventMask::CREATE | EventMask::MOVED_TO => if let Some(ref name) = evt.name {
+                        state.insert(name.clone());
                     } else {
                         *state_res = Err(Arc::new(io::Error::new(io::ErrorKind::Other, Box::new(InotifyNameError(evt.mask)))));
                     },
-                    EventMask::DELETE | EventMask::MOVED_FROM => if let Some(name) = evt.name {
-                        state.remove(&name);
+                    EventMask::DELETE | EventMask::MOVED_FROM => if let Some(ref name) = evt.name {
+                        state.remove(name);
                     } else {
                         *state_res = Err(Arc::new(io::Error::new(io::ErrorKind::Other, Box::new(InotifyNameError(evt.mask)))));
                     },
                     EventMask::DELETE_SELF | EventMask::MOVE_SELF => { *state_res = Err(Arc::new(io::Error::new(io::ErrorKind::NotFound, InotifyDeleteSelfError))); }
-                    _ => { *state_res = Err(Arc::new(io::Error::new(io::ErrorKind::Other, Box::new(InotifyMaskError(evt.mask))))); }
-                }
-            },
-        }
-    }
-}
-
-/// Subscribe to changes to the contents of a directory.
-///
-/// Usage: `Dir(std::path::PathBuf, ctrlflow::fs::DirDelta) => ctrlflow::fs::dir`
-pub fn dir<I: NodeId>(_: CtrlFlow<I>, path: PathBuf) -> impl Stream<Item = DirDelta> {
-    stream::once(async move {
-        let mut watcher = Inotify::init()?;
-        watcher.add_watch(&path, WatchMask::ATTRIB | WatchMask::CLOSE_WRITE | WatchMask::CREATE | WatchMask::DELETE | WatchMask::DELETE_SELF | WatchMask::MOVE | WatchMask::MOVE_SELF)?;
-        let init = fs::read_dir(path).await?.map_ok(|entry| entry.file_name()).try_collect().await?;
-        Ok::<_, io::Error>(
-            stream::once(async move { Ok(DirDelta::Init(Ok(init))) })
-                .chain(watcher.event_stream(Vec::default())?.map_ok(DirDelta::Other))
-        )
-    })
-        .try_flatten()
-        .map(|res| match res {
-            Ok(event) => event,
-            Err(e) => DirDelta::Init(Err(Arc::new(e))),
-        })
-}
-
-impl Delta for Result<Option<Vec<u8>>, Arc<io::Error>> {
-    type State = Result<Option<Vec<u8>>, Arc<io::Error>>;
-
-    fn from_initial_state(init: Result<Option<Vec<u8>>, Arc<io::Error>>) -> Result<Option<Vec<u8>>, Arc<io::Error>> {
-        init
-    }
-
-    fn initial_state(self) -> Option<Result<Option<Vec<u8>>, Arc<io::Error>>> {
-        Some(self)
-    }
-
-    fn kind(&self) -> &'static str {
-        match self {
-            Ok(Some(_)) => "Exists",
-            Ok(None) => "DoesNotExist",
-            Err(_) => "Error",
-        }
-    }
-
-    fn update_inner(self, state: &mut Result<Option<Vec<u8>>, Arc<io::Error>>) {
-        *state = self;
-    }
-}
-
-/// Subscribe to changes to the contents of a regular file.
-///
-/// Usage: `Dir(std::path::PathBuf, Result<Option<Vec<u8>>, std::sync::Arc<std::io::Error>>) => ctrlflow::fs::file`
-pub fn file<I: NodeId + NodeIdExt>(flow: CtrlFlow<I>, path: PathBuf) -> impl Stream<Item = Result<Option<Vec<u8>>, Arc<io::Error>>>
-where DirDelta: From<I::Delta> {
-    let path_clone = path.clone();
-    let name = path.file_name().expect("watched file has no name").to_owned();
-    stream::once(async move {
-        let parent = path_clone.parent().expect("file has no parent").to_owned();
-        flow.get_int::<DirDelta>(I::file(path_clone), I::dir(parent)).await.expect("dependency loop").stream().await
-    })
-        .flatten()
-        .filter_map(move |delta| {
-            let name = name.clone();
-            async move {
-                match delta {
-                    DirDelta::Init(Ok(names)) => Some(Ok(names.contains(&name))),
-                    DirDelta::Init(Err(e)) => Some(Err(e)),
-                    DirDelta::Other(evt) => match evt.mask {
-                        EventMask::ATTRIB | EventMask::CLOSE_WRITE | EventMask::CREATE | EventMask::MOVED_TO => if evt.name.map_or(false, |evt_name| name == evt_name) { Some(Ok(true)) } else { None },
-                        EventMask::DELETE_SELF | EventMask::MOVE_SELF => if evt.name.map_or(false, |evt_name| name == evt_name) { Some(Ok(false)) } else { None },
-                        _ => None,
-                    }
-                }
+                    _ => *state_res = Err(Arc::new(io::Error::new(io::ErrorKind::Other, Box::new(InotifyMaskError(evt.mask))))),
+                },
+                Err(e) => *state_res = Err(Arc::clone(e)),
             }
-        })
-        .and_then(move |exists| {
-            let path = path.clone();
-            async move { Ok(if exists {
-                let mut f = File::open(&path).await?;
-                let mut buf = Vec::default();
-                f.read_to_end(&mut buf).await?;
-                Some(buf)
-            } else {
-                None
-            }) }
-        })
+        }
+    }
 }
