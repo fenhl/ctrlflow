@@ -7,8 +7,10 @@ use {
             HashMap,
             hash_map,
         },
+        fmt,
         hash::Hash,
         marker::PhantomData,
+        ops::Range,
         pin::Pin,
         sync::Arc,
     },
@@ -20,6 +22,10 @@ use {
             Stream,
             StreamExt as _,
         },
+    },
+    petgraph::{
+        algo::astar,
+        graphmap::DiGraphMap,
     },
     tokio::sync::{
         Mutex,
@@ -53,13 +59,7 @@ pub trait Key: Clone + Eq + Hash + Send + Sync + Sized + 'static {
     type Delta: Delta<Self::State>;
 
     /// Returns an initial state of this node, as well as a stream with all changes from that point.
-    fn maintain(self, runner: RunnerInternal) -> Pin<Box<dyn Future<Output = (Self::State, Pin<Box<dyn Stream<Item = Self::Delta> + Send>>)> + Send>>;
-}
-
-struct HandleMapKey<K: Key>(PhantomData<K>);
-
-impl<K: Key> TypeMapKey for HandleMapKey<K> {
-    type Value = HashMap<K, Handle<K>>;
+    fn maintain(self, runner: RunnerInternal<Self>) -> Pin<Box<dyn Future<Output = (Self::State, Pin<Box<dyn Stream<Item = Self::Delta> + Send>>)> + Send>>;
 }
 
 /// A handle to a node whose state is being maintained by a `Runner`.
@@ -115,22 +115,85 @@ impl<K: Key> Clone for Handle<K> {
 #[derive(Debug)]
 pub struct DependencyLoop;
 
-/// An internal handle to a runner passed to the [`Key::maintain`] method.
-///
-/// Nodes subscribed to from here will be tracked as internal dependencies.
-pub struct RunnerInternal {
-    runner: Runner,
-}
-
-impl RunnerInternal {
-    pub async fn subscribe<K: Key>(&self, key: K) -> Result<Handle<K>, DependencyLoop> {
-        //TODO check for dependency loops
-        Ok(self.runner.subscribe(key).await)
+impl fmt::Display for DependencyLoop {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "dependency loop")
     }
 }
 
-#[derive(Clone)]
+impl std::error::Error for DependencyLoop {}
+
+struct DepsMapKey<K: Key>(PhantomData<K>);
+
+impl<K: Key> TypeMapKey for DepsMapKey<K> {
+    type Value = HashMap<K, usize>;
+}
+
+struct Deps {
+    graph: DiGraphMap<usize, ()>,
+    indices: TypeMap,
+    next_idx: Range<usize>,
+}
+
+impl Default for Deps {
+    fn default() -> Self {
+        Self {
+            graph: DiGraphMap::default(),
+            indices: TypeMap::default(),
+            next_idx: 0..usize::MAX,
+        }
+    }
+}
+
+/// An internal handle to a runner passed to the [`Key::maintain`] method.
+///
+/// Nodes subscribed to from here will be tracked as internal dependencies.
+pub struct RunnerInternal<KD: Key> {
+    runner: Runner,
+    key: KD,
+}
+
+impl<KD: Key> RunnerInternal<KD> {
+    pub async fn subscribe<KU: Key>(&self, upstream_key: KU) -> Result<Handle<KU>, DependencyLoop> {
+        {
+            let mut deps = self.runner.deps.lock().await;
+            let upstream_ix = if let Some(&upstream_ix) = deps.indices.get::<DepsMapKey<KU>>().and_then(|upstream_indices| upstream_indices.get(&upstream_key)) {
+                if let Some(&downstream_ix) = deps.indices.get::<DepsMapKey<KD>>().and_then(|downstream_indices| downstream_indices.get(&self.key)) {
+                    if astar(&deps.graph, upstream_ix, |ix| ix == downstream_ix, |_| 1, |_| 0).is_some() {
+                        return Err(DependencyLoop) //TODO include loop path in error?
+                    }
+                }
+                upstream_ix
+            } else {
+                let upstream_ix = deps.next_idx.next().expect("too many nodes");
+                deps.indices.entry::<DepsMapKey<KU>>().or_default().insert(upstream_key.clone(), upstream_ix);
+                deps.graph.add_node(upstream_ix);
+                upstream_ix
+            };
+            let downstream_ix = if let Some(&downstream_ix) = deps.indices.get::<DepsMapKey<KD>>().and_then(|downstream_indices| downstream_indices.get(&self.key)) {
+                downstream_ix
+            } else {
+                let downstream_ix = deps.next_idx.next().expect("too many nodes");
+                deps.indices.entry::<DepsMapKey<KD>>().or_default().insert(self.key.clone(), downstream_ix);
+                deps.graph.add_node(downstream_ix);
+                downstream_ix
+            };
+            // graph edges point in the direction the data flows
+            deps.graph.add_edge(upstream_ix, downstream_ix, ());
+        }
+        Ok(self.runner.subscribe(upstream_key).await)
+    }
+}
+
+struct HandleMapKey<K: Key>(PhantomData<K>);
+
+impl<K: Key> TypeMapKey for HandleMapKey<K> {
+    type Value = HashMap<K, Handle<K>>;
+}
+
+#[derive(Default, Clone)]
 pub struct Runner {
+    deps: Arc<Mutex<Deps>>,
     map: Arc<Mutex<TypeMap>>,
 }
 
@@ -139,7 +202,7 @@ impl Runner {
         match self.map.lock().await.entry::<HandleMapKey<K>>().or_default().entry(key.clone()) {
             hash_map::Entry::Occupied(entry) => entry.get().clone(),
             hash_map::Entry::Vacant(entry) => {
-                let runner = RunnerInternal { runner: self.clone() };
+                let runner = RunnerInternal { runner: self.clone(), key: key.clone() };
                 let (state_tx, state_rx) = oneshot::channel();
                 let (stream_tx, stream_rx) = oneshot::channel();
                 tokio::spawn(async move {
@@ -164,14 +227,6 @@ impl Runner {
                 entry.insert(handle.clone());
                 handle
             }
-        }
-    }
-}
-
-impl Default for Runner {
-    fn default() -> Runner {
-        Runner {
-            map: Arc::new(Mutex::new(TypeMap::new())),
         }
     }
 }
