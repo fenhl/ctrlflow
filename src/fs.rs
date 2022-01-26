@@ -41,7 +41,7 @@ impl Key for Dir {
     type State = Result<HashSet<OsString>, Arc<io::Error>>;
     type Delta = Result<inotify::EventOwned, Arc<io::Error>>;
 
-    fn maintain(self, _: RunnerInternal) -> Pin<Box<dyn Future<Output = (Result<HashSet<OsString>, Arc<io::Error>>, Pin<Box<dyn Stream<Item = Result<inotify::EventOwned, Arc<io::Error>>> + Send>>)> + Send>> {
+    fn maintain(self, _: RunnerInternal<Self>) -> Pin<Box<dyn Future<Output = (Result<HashSet<OsString>, Arc<io::Error>>, Pin<Box<dyn Stream<Item = Result<inotify::EventOwned, Arc<io::Error>>> + Send>>)> + Send>> {
         Box::pin(async move {
             let mut watcher = match Inotify::init() {
                 Ok(watcher) => watcher,
@@ -70,7 +70,7 @@ impl Key for File {
     type State = Result<Option<Vec<u8>>, Arc<io::Error>>;
     type Delta = Result<Option<Vec<u8>>, Arc<io::Error>>;
 
-    fn maintain(self, runner: RunnerInternal) -> Pin<Box<dyn Future<Output = (Result<Option<Vec<u8>>, Arc<io::Error>>, Pin<Box<dyn Stream<Item = Result<Option<Vec<u8>>, Arc<io::Error>>> + Send>>)> + Send>> {
+    fn maintain(self, runner: RunnerInternal<Self>) -> Pin<Box<dyn Future<Output = (Result<Option<Vec<u8>>, Arc<io::Error>>, Pin<Box<dyn Stream<Item = Result<Option<Vec<u8>>, Arc<io::Error>>> + Send>>)> + Send>> {
         let path = self.0.clone();
         let name = self.0.file_name().expect("watched file has no name").to_owned();
         Box::pin(async move {
