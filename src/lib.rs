@@ -148,6 +148,7 @@ impl Default for Deps {
 /// An internal handle to a runner passed to the [`Key::maintain`] method.
 ///
 /// Nodes subscribed to from here will be tracked as internal dependencies.
+#[derive(Clone)]
 pub struct RunnerInternal<KD: Key> {
     runner: Runner,
     key: KD,
