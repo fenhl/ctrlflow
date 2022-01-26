@@ -46,9 +46,9 @@ pub fn maintain_from_states<'a, S: Diff + Clone + Send + Sync + 'a>(mut states: 
 where S: Diff {
     Box::pin(async move {
         let init = states.next().await.expect("empty states stream");
-        (init.clone(), Box::pin(stream::unfold((init, states), |(prev_state, mut states)| async move {
+        (init.clone(), stream::unfold((init, states), |(prev_state, mut states)| async move {
             states.next().await.map(|next_state| (next_state.diff(&prev_state), (next_state, states)))
-        })) as Pin<Box<dyn Stream<Item = _> + Send + 'a>>)
+        }).boxed())
     })
 }
 

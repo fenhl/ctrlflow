@@ -45,14 +45,14 @@ impl Key for Dir {
         Box::pin(async move {
             let mut watcher = match Inotify::init() {
                 Ok(watcher) => watcher,
-                Err(e) => return (Err(Arc::new(e)), Box::pin(stream::empty()) as Pin<Box<dyn Stream<Item = _> + Send + 'static>>),
+                Err(e) => return (Err(Arc::new(e)), stream::empty().boxed()),
             };
             if let Err(e) = watcher.add_watch(&self.0, WatchMask::ATTRIB | WatchMask::CLOSE_WRITE | WatchMask::CREATE | WatchMask::DELETE | WatchMask::DELETE_SELF | WatchMask::MOVE | WatchMask::MOVE_SELF) {
-                return (Err(Arc::new(e)), Box::pin(stream::empty()) as Pin<Box<dyn Stream<Item = _> + Send + 'static>>)
+                return (Err(Arc::new(e)), stream::empty().boxed())
             }
             let read_dir = match fs::read_dir(self.0).await {
                 Ok(read_dir) => ReadDirStream::new(read_dir),
-                Err(e) => return (Err(Arc::new(e)), Box::pin(stream::empty()) as Pin<Box<dyn Stream<Item = _> + Send + 'static>>),
+                Err(e) => return (Err(Arc::new(e)), stream::empty().boxed()),
             };
             (
                 read_dir.map_ok(|entry| entry.file_name()).try_collect().await.map_err(Arc::new),
