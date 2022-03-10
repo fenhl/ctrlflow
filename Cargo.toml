@@ -20,7 +20,7 @@ features = ["from"]
 optional = true
 
 [dependencies.inotify]
-version = "0.9"
+version = "0.10"
 optional = true
 
 [dependencies.petgraph]
