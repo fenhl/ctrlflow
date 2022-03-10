@@ -19,6 +19,7 @@ use {
     futures::{
         future::Future,
         stream::{
+            FusedStream,
             Stream,
             StreamExt as _,
         },
@@ -85,7 +86,7 @@ impl<K: Key> Handle<K> {
     /// Returns a stream that yields the current state of this node at the start of the stream, as well as the state of this node after each change.
     ///
     /// Note that some states may be skipped if the underlying deltas channel lags.
-    pub fn states(&self) -> impl Stream<Item = K::State> + '_
+    pub fn states(&self) -> impl Stream<Item = K::State> + FusedStream + '_
     where K::State: Clone + Unpin {
         stream! {
             let (init, mut deltas) = self.stream().await;
@@ -238,4 +239,14 @@ impl Runner {
 /// This avoids redundant copies of shared dependencies of the nodes.
 pub async fn run<K: Key>(key: K) -> Handle<K> {
     Runner::default().subscribe(key).await
+}
+
+/// If the expression evaluates to `Err`, returns the error as the initial state and a stream with no elements.
+#[macro_export] macro_rules! maintain_try {
+    ($res:expr) => {
+        match $res {
+            Ok(x) => x,
+            Err(e) => return (Err(e.into()), ::futures::stream::StreamExt::boxed(::futures::stream::empty()))
+        }
+    };
 }
