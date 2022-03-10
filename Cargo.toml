@@ -2,7 +2,7 @@
 name = "ctrlflow"
 version = "0.4.0"
 authors = ["Fenhl <fenhl@fenhl.net>"]
-edition = "2018"
+edition = "2021"
 
 [features]
 fs = ["derive_more", "inotify", "tokio/fs", "tokio-stream"]
