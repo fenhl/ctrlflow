@@ -24,6 +24,7 @@ use {
             StreamExt as _,
         },
     },
+    log::debug,
     petgraph::{
         algo::astar,
         graphmap::DiGraphMap,
@@ -95,11 +96,16 @@ impl<K: Key> Handle<K> {
             loop {
                 match deltas.recv().await {
                     Ok(delta) => {
+                        debug!("ctrlflow states received delta");
                         delta.apply(&mut state);
                         yield state.clone();
                     }
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Closed) => {
+                        debug!("ctrlflow states closed");
+                        break
+                    }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
+                        debug!("ctrlflow states lagged");
                         let (init, new_deltas) = self.stream().await;
                         state = init.clone();
                         deltas = new_deltas;
