@@ -99,7 +99,12 @@ impl<K: Key> Handle<K> {
                         yield state.clone();
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        let (init, new_deltas) = self.stream().await;
+                        state = init.clone();
+                        deltas = new_deltas;
+                        yield state.clone();
+                    }
                 }
             }
         }
