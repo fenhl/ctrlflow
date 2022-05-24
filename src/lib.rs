@@ -89,11 +89,15 @@ impl<K: Key> Handle<K> {
     /// Note that some states may be skipped if the underlying deltas channel lags.
     pub fn states(&self) -> impl Stream<Item = K::State> + FusedStream + '_
     where K::State: Clone + Unpin {
+        debug!("ctrlflow states called");
         stream! {
+            debug!("ctrlflow states stream started");
             let (init, mut deltas) = self.stream().await;
+            debug!("ctrlflow states: got inner stream");
             let mut state = init.clone();
             yield state.clone();
             loop {
+                debug!("ctrlflow states: waiting for delta");
                 match deltas.recv().await {
                     Ok(delta) => {
                         debug!("ctrlflow states received delta");
