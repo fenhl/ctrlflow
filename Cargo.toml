@@ -8,7 +8,6 @@ edition = "2021"
 fs = ["derive_more", "inotify", "tokio/fs", "tokio-stream"]
 
 [dependencies]
-async-stream = "0.3"
 derivative = "2"
 futures = "0.3"
 log = "0.4"

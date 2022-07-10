@@ -14,11 +14,11 @@ use {
         pin::Pin,
         sync::Arc,
     },
-    async_stream::stream,
     derivative::Derivative,
     futures::{
         future::Future,
         stream::{
+            self,
             FusedStream,
             Stream,
             StreamExt as _,
@@ -90,34 +90,32 @@ impl<K: Key> Handle<K> {
     pub fn states(&self) -> impl Stream<Item = K::State> + FusedStream + '_
     where K::State: Clone + Unpin {
         debug!("ctrlflow states called");
-        stream! {
-            debug!("ctrlflow states stream started");
-            let (init, mut deltas) = self.stream().await;
-            debug!("ctrlflow states: got inner stream");
-            let mut state = init.clone();
-            yield state.clone();
-            loop {
+        stream::unfold(None::<(K::State, broadcast::Receiver<K::Delta>)>, |state| async {
+            if let Some((mut state, mut deltas)) = state {
                 debug!("ctrlflow states: waiting for delta");
                 match deltas.recv().await {
                     Ok(delta) => {
                         debug!("ctrlflow states received delta");
                         delta.apply(&mut state);
-                        yield state.clone();
+                        Some((state.clone(), Some((state, deltas))))
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         debug!("ctrlflow states closed");
-                        break
+                        None
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         debug!("ctrlflow states lagged");
-                        let (init, new_deltas) = self.stream().await;
-                        state = init.clone();
-                        deltas = new_deltas;
-                        yield state.clone();
+                        let (init, deltas) = self.stream().await;
+                        Some((init.clone(), Some((init.clone(), deltas))))
                     }
                 }
+            } else {
+                debug!("ctrlflow states stream started");
+                let (init, deltas) = self.stream().await;
+                debug!("ctrlflow states: got inner stream");
+                Some((init.clone(), Some((init.clone(), deltas))))
             }
-        }
+        })
     }
 }
 
