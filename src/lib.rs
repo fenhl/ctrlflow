@@ -18,7 +18,10 @@ use {
         sync::Arc,
     },
     futures::{
-        future::Future,
+        future::{
+            self,
+            Future,
+        },
         stream::{
             self,
             Stream,
@@ -339,12 +342,12 @@ impl Runner {
         }
     }
 
-    pub fn subscribe<K: Key>(&self, key: K) -> impl Stream<Item = K::State> {
+    pub fn subscribe<K: Key>(&self, key: K) -> impl Stream<Item = K::State> + Unpin {
         match self.map.lock().entry(AnyKey::new(key.clone())) {
             hash_map::Entry::Occupied(entry) => {
                 let handle = entry.get().downcast_ref::<Handle<K>>().expect("handle type mismatch");
                 stream::iter(handle.state.clone())
-                    .chain(BroadcastStream::new(handle.tx.subscribe()).filter_map(|res| async move { res.ok() }))
+                    .chain(BroadcastStream::new(handle.tx.subscribe()).filter_map(|res| future::ready(res.ok())))
                     .left_stream()
             }
             hash_map::Entry::Vacant(entry) => {
@@ -357,7 +360,7 @@ impl Runner {
                     tx,
                 }));
                 self.clone().start_maintaining(key);
-                BroadcastStream::new(rx).filter_map(|res| async move { res.ok() }).right_stream()
+                BroadcastStream::new(rx).filter_map(|res| future::ready(res.ok())).right_stream()
             },
         }
     }
