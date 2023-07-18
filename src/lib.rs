@@ -43,7 +43,7 @@ pub trait Key: Clone + Eq + Hash + Send + 'static {
 }
 
 pub enum Maintenance<K: Key> {
-    Source(Pin<Box<dyn Stream<Item = K::State> + Unpin + Send>>),
+    Source(Pin<Box<dyn Stream<Item = K::State> + Send>>),
     Derived(Box<dyn for<'d> FnOnce(&'d mut Dependencies<K>, Option<K::State>) -> Pin<Box<dyn Future<Output = Option<K::State>> + Send + 'd>> + Send>),
 }
 
