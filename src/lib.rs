@@ -44,18 +44,16 @@ pub trait Key: Clone + Eq + Hash + Send + 'static {
 
 pub enum Maintenance<K: Key> {
     Source(Pin<Box<dyn Stream<Item = K::State> + Unpin + Send>>),
-    Derived(Box<dyn FnOnce(&mut Dependencies<K>, Option<K::State>) -> Pin<Box<dyn Future<Output = Option<K::State>> + Send>> + Send>),
+    Derived(Box<dyn for<'d> FnOnce(&'d mut Dependencies<K>, Option<K::State>) -> Pin<Box<dyn Future<Output = Option<K::State>> + Send + 'd>> + Send>),
 }
 
-/*
-pub fn filter_eq<K: Key>(f: impl FnOnce(&mut Dependencies<K>, Option<&K::State>) -> Pin<Box<dyn Future<Output = K::State> + Send + 'a>> + Send + 'static) -> Maintenance<K>
+pub fn filter_eq<K: Key>(f: impl FnOnce(&mut Dependencies<K>, Option<&K::State>) -> Pin<Box<dyn Future<Output = K::State> + Send>> + Send + 'static) -> Maintenance<K>
 where K::State: PartialEq {
     Maintenance::Derived(Box::new(|dependencies, previous| Box::pin(async move {
         let next = f(dependencies, previous.as_ref()).await;
         previous.map_or(false, |previous| next != previous).then_some(next)
     })))
 }
-*/
 
 #[derive(Debug, thiserror::Error)]
 #[error("gap in dependency states")]
