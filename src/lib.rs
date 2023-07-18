@@ -55,10 +55,6 @@ where K::State: PartialEq {
     })))
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("gap in dependency states")]
-pub struct Lagged;
-
 /// Calling one of the methods on this type registers the key passed as a parameter as a dependency of the key from which it is being called, so if the dependency changes, the dependent will also be recomputed.
 pub struct Dependencies<KD: Key> {
     runner: Runner,
@@ -160,7 +156,7 @@ impl<KD: Key> Dependencies<KD> {
     /// To ensure that no intermediate states are skipped, this must be called each time, and must not be mixed with `get_latest` or `try_get_latest` calls on the same key.
     ///
     /// If there is not already a known state for the key, this waits until it is computed.
-    pub async fn get_next<KU: Key>(&mut self, key: KU) -> Result<KU::State, Lagged> {
+    pub async fn get_next<KU: Key>(&mut self, key: KU) -> KU::State {
         self.new.insert(AnyKey::new(key.clone()));
         let mut rx = {
             let mut map = self.runner.map.lock();
@@ -177,7 +173,7 @@ impl<KD: Key> Dependencies<KD> {
                     let handle = entry.get_mut().downcast_mut::<Handle<KU>>().expect("handle type mismatch");
                     handle.dependents.insert(AnyKey::new(self.key.clone()));
                     if let Some(ref state) = handle.state {
-                        return Ok(state.clone())
+                        return state.clone()
                     } else {
                         handle.tx.subscribe()
                     }
@@ -196,11 +192,7 @@ impl<KD: Key> Dependencies<KD> {
                 }
             }
         };
-        match rx.recv().await {
-            Ok(state) => Ok(state),
-            Err(broadcast::error::RecvError::Closed) => panic!("channel closed with active dependency"),
-            Err(broadcast::error::RecvError::Lagged(_)) => Err(Lagged),
-        }
+        rx.recv().await.unwrap()
     }
 
     /// Returns the next state of the given key.
@@ -208,7 +200,7 @@ impl<KD: Key> Dependencies<KD> {
     /// To ensure that no intermediate states are skipped, this must be called each time, and must not be mixed with `get_latest` or `try_get_latest` calls on the same key.
     ///
     /// If there is not already a known state for the key, this returns `Ok(None)`.
-    pub fn try_get_next<KU: Key>(&mut self, key: KU) -> Result<Option<KU::State>, Lagged> {
+    pub fn try_get_next<KU: Key>(&mut self, key: KU) -> Option<KU::State> {
         self.new.insert(AnyKey::new(key.clone()));
         let mut map = self.runner.map.lock();
         if let Some(handle) = map.get_mut(&AnyKey::new(self.key.clone())) {
@@ -224,7 +216,7 @@ impl<KD: Key> Dependencies<KD> {
                 let handle = entry.get_mut().downcast_mut::<Handle<KU>>().expect("handle type mismatch");
                 handle.dependents.insert(AnyKey::new(self.key.clone()));
                 if let Some(ref state) = handle.state {
-                    return Ok(Some(state.clone()))
+                    return Some(state.clone())
                 }
             }
             hash_map::Entry::Vacant(entry) => {
@@ -238,7 +230,7 @@ impl<KD: Key> Dependencies<KD> {
                 self.runner.clone().start_maintaining(key);
             }
         }
-        Ok(None)
+        None
     }
 }
 
