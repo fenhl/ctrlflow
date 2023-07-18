@@ -43,7 +43,7 @@ pub trait Key: Clone + Eq + Hash + Send + 'static {
 }
 
 pub enum Maintenance<K: Key> {
-    Source(Pin<Box<dyn Stream<Item = K::State> + Send>>),
+    Stream(Box<dyn FnOnce(Runner) -> Pin<Box<dyn Stream<Item = K::State> + Send>> + Send>),
     Derived(Box<dyn for<'d> FnOnce(&'d mut Dependencies<K>, Option<K::State>) -> Pin<Box<dyn Future<Output = Option<K::State>> + Send + 'd>> + Send>),
 }
 
@@ -312,26 +312,29 @@ impl Runner {
 
     fn start_maintaining<K: Key>(self, key: K) -> tokio::task::JoinHandle<()> {
         match key.maintain() {
-            Maintenance::Source(mut stream) => tokio::spawn(async move {
-                while let Some(new_state) = stream.next().await {
-                    let mut map = self.map.lock();
-                    let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else { break };
-                    let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
-                    handle.state = Some(new_state.clone());
-                    let mut any_notified = false;
-                    if handle.tx.send(new_state.clone()).is_ok() {
-                        any_notified = true;
+            Maintenance::Stream(stream_fn) => {
+                let mut stream = stream_fn(self.clone());
+                tokio::spawn(async move {
+                    while let Some(new_state) = stream.next().await {
+                        let mut map = self.map.lock();
+                        let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else { break };
+                        let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
+                        handle.state = Some(new_state.clone());
+                        let mut any_notified = false;
+                        if handle.tx.send(new_state.clone()).is_ok() {
+                            any_notified = true;
+                        }
+                        for dependent in &handle.dependents {
+                            tokio::spawn((dependent.update)(&self, AnyKey::new(key.clone()), Box::new(new_state.clone())));
+                            any_notified = true;
+                        }
+                        if !any_notified {
+                            map.remove(&AnyKey::new(key));
+                            break
+                        }
                     }
-                    for dependent in &handle.dependents {
-                        tokio::spawn((dependent.update)(&self, AnyKey::new(key.clone()), Box::new(new_state.clone())));
-                        any_notified = true;
-                    }
-                    if !any_notified {
-                        map.remove(&AnyKey::new(key));
-                        break
-                    }
-                }
-            }),
+                })
+            }
             Maintenance::Derived(_) => tokio::spawn(self.update_derived_state(key)),
         }
     }
