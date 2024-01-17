@@ -82,16 +82,16 @@ impl<KD: Key> Dependencies<KD> {
         println!("ctrlflow::Dependencies::get_latest({self:?}, {key:?})");
         self.new.insert(AnyKey::new(key.clone()));
         let mut rx = {
-            println!("locking runner map");
+            println!("{key:?}: locking runner map");
             let mut map = self.runner.map.lock();
-            println!("runner map locked");
+            println!("{key:?}: runner map locked");
             if let Some(handle) = map.get_mut(&AnyKey::new(self.key.clone())) {
                 let handle = handle.downcast_mut::<Handle<KD>>().expect("handle type mismatch");
                 if let Some(queue) = handle.dependencies.get_mut(&AnyKey::new(key.clone())) {
                     let state = queue.pop_back();
                     queue.clear();
                     if let Some(state) = state {
-                        println!("entry already present");
+                        println!("{key:?}: entry already present");
                         return *state.downcast::<KU::State>().expect("queued dependency type mismatch")
                     }
                 }
@@ -101,10 +101,10 @@ impl<KD: Key> Dependencies<KD> {
                     let handle = entry.get_mut().downcast_mut::<Handle<KU>>().expect("handle type mismatch");
                     handle.dependents.insert(AnyKey::new(self.key.clone()));
                     if let Some(ref state) = handle.state {
-                        println!("state already present");
+                        println!("{key:?}: state already present");
                         return state.clone()
                     } else {
-                        println!("subscribing");
+                        println!("{key:?}: subscribing");
                         handle.tx.subscribe()
                     }
                 }
@@ -117,18 +117,21 @@ impl<KD: Key> Dependencies<KD> {
                         dependencies: HashMap::default(),
                         tx,
                     }));
-                    println!("starting maintenance");
-                    self.runner.clone().start_maintaining(key);
+                    println!("{key:?}: starting maintenance");
+                    self.runner.clone().start_maintaining(key.clone());
                     rx
                 }
             }
         };
-        println!("waiting for next state");
+        println!("{key:?}: waiting for next state");
         loop {
             match rx.recv().await {
-                Ok(state) => break state,
+                Ok(state) => {
+                    println!("{key:?}: got state");
+                    break state
+                }
                 Err(broadcast::error::RecvError::Closed) => panic!("channel closed with active dependency"),
-                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Lagged(_)) => println!("{key:?}: lagged"),
             }
         }
     }
