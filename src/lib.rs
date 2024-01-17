@@ -9,6 +9,7 @@ use {
                 HashMap,
             },
         },
+        fmt,
         hash::Hash,
         iter,
         pin::Pin,
@@ -35,7 +36,7 @@ mod dynamic;
 
 const CHANNEL_CAPACITY: usize = 256;
 
-pub trait Key: Clone + Eq + Hash + Send + 'static {
+pub trait Key: fmt::Debug + Clone + Eq + Hash + Send + 'static {
     type State: Clone + Send + Sync;
 
     /// This function must consistently return the same variant of [`Maintenance`] for the same key, i.e. a source must never become derived or vice versa.
@@ -66,6 +67,7 @@ pub enum Next<K: Key> {
 }
 
 /// Calling one of the methods on this type registers the key passed as a parameter as a dependency of the key from which it is being called, so if the dependency changes, the dependent will also be recomputed.
+#[derive(Debug)]
 pub struct Dependencies<KD: Key> {
     runner: Runner,
     key: KD,
@@ -77,15 +79,19 @@ impl<KD: Key> Dependencies<KD> {
     ///
     /// If there is not already a known state for the key, this waits until it is computed.
     pub async fn get_latest<KU: Key>(&mut self, key: KU) -> KU::State {
+        println!("ctrlflow::Dependencies::get_latest({self:?}, {key:?})");
         self.new.insert(AnyKey::new(key.clone()));
         let mut rx = {
+            println!("locking runner map");
             let mut map = self.runner.map.lock();
+            println!("runner map locked");
             if let Some(handle) = map.get_mut(&AnyKey::new(self.key.clone())) {
                 let handle = handle.downcast_mut::<Handle<KD>>().expect("handle type mismatch");
                 if let Some(queue) = handle.dependencies.get_mut(&AnyKey::new(key.clone())) {
                     let state = queue.pop_back();
                     queue.clear();
                     if let Some(state) = state {
+                        println!("entry already present");
                         return *state.downcast::<KU::State>().expect("queued dependency type mismatch")
                     }
                 }
@@ -95,8 +101,10 @@ impl<KD: Key> Dependencies<KD> {
                     let handle = entry.get_mut().downcast_mut::<Handle<KU>>().expect("handle type mismatch");
                     handle.dependents.insert(AnyKey::new(self.key.clone()));
                     if let Some(ref state) = handle.state {
+                        println!("state already present");
                         return state.clone()
                     } else {
+                        println!("subscribing");
                         handle.tx.subscribe()
                     }
                 }
@@ -109,11 +117,13 @@ impl<KD: Key> Dependencies<KD> {
                         dependencies: HashMap::default(),
                         tx,
                     }));
+                    println!("starting maintenance");
                     self.runner.clone().start_maintaining(key);
                     rx
                 }
             }
         };
+        println!("waiting for next state");
         loop {
             match rx.recv().await {
                 Ok(state) => break state,
@@ -258,7 +268,7 @@ struct Handle<K: Key> {
     dependencies: HashMap<AnyKey, VecDeque<Box<dyn Any + Send>>>,
 }
 
-#[derive(Default, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct Runner {
     map: Arc<Mutex<HashMap<AnyKey, Box<dyn Any + Send>>>>,
 }

@@ -2,6 +2,7 @@ use {
     std::{
         any::Any,
         collections::hash_map::DefaultHasher,
+        fmt,
         hash::{
             BuildHasher as _,
             BuildHasherDefault,
@@ -56,6 +57,19 @@ impl AnyKey {
                 handle.dependents.remove(&dependent_key);
             }),
         }
+    }
+}
+
+impl fmt::Debug for AnyKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self { data, eq: _, hash, update: _, delete_dependent: _ } = self;
+        f.debug_struct("AnyKey")
+            .field("data", data)
+            .field("eq", &format_args!("_"))
+            .field("hash", hash)
+            .field("update", &format_args!("_"))
+            .field("delete_dependent", &format_args!("_"))
+            .finish()
     }
 }
 
