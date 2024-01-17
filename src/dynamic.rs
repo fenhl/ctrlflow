@@ -16,6 +16,7 @@ use {
         Future,
     },
     if_chain::if_chain,
+    log_lock::*,
     crate::{
         Handle,
         Key,
@@ -42,7 +43,7 @@ impl AnyKey {
             eq: Box::new(move |other| other.downcast_ref::<K>().map_or(false, |other| self_eq == *other)),
             hash: BuildHasherDefault::<DefaultHasher>::default().hash_one(self_hash),
             update: Box::new(move |runner, dependency_key, dependency_value| if_chain! {
-                if let Some(handle) = runner.map.lock().get_mut(&AnyKey::new(self_update.clone()));
+                if let Some(handle) = lock!(@sync runner.map).get_mut(&AnyKey::new(self_update.clone()));
                 let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
                 if let Some(queue) = handle.dependencies.get_mut(&dependency_key);
                 then {
@@ -54,7 +55,7 @@ impl AnyKey {
                     Box::pin(future::ready(()))
                 }
             }),
-            delete_dependent: Box::new(move |runner, dependent_key| if let Some(handle) = runner.map.lock().get_mut(&AnyKey::new(self_delete_dependent.clone())) {
+            delete_dependent: Box::new(move |runner, dependent_key| if let Some(handle) = lock!(@sync runner.map).get_mut(&AnyKey::new(self_delete_dependent.clone())) {
                 let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
                 handle.dependents.remove(&dependent_key);
             }),

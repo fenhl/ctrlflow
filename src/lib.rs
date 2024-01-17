@@ -26,7 +26,7 @@ use {
             StreamExt as _,
         },
     },
-    parking_lot::Mutex,
+    log_lock::*,
     tokio::sync::broadcast,
     tokio_stream::wrappers::BroadcastStream,
     crate::dynamic::AnyKey,
@@ -83,7 +83,7 @@ impl<KD: Key> Dependencies<KD> {
         self.new.insert(AnyKey::new(key.clone()));
         let mut rx = {
             println!("get_latest({key:?}): locking runner map");
-            let mut map = self.runner.map.lock();
+            let mut map = lock!(@sync self.runner.map);
             println!("get_latest({key:?}): runner map locked");
             if let Some(handle) = map.get_mut(&AnyKey::new(self.key.clone())) {
                 let handle = handle.downcast_mut::<Handle<KD>>().expect("handle type mismatch");
@@ -141,7 +141,7 @@ impl<KD: Key> Dependencies<KD> {
     /// If there is not already a known state for the key, this returns `None`.
     pub fn try_get_latest<KU: Key>(&mut self, key: KU) -> Option<KU::State> {
         self.new.insert(AnyKey::new(key.clone()));
-        let mut map = self.runner.map.lock();
+        let mut map = lock!(@sync self.runner.map);
         if let Some(handle) = map.get_mut(&AnyKey::new(self.key.clone())) {
             let handle = handle.downcast_mut::<Handle<KD>>().expect("handle type mismatch");
             if let Some(queue) = handle.dependencies.get_mut(&AnyKey::new(key.clone())) {
@@ -182,7 +182,7 @@ impl<KD: Key> Dependencies<KD> {
     pub async fn get_next<KU: Key>(&mut self, key: KU) -> Next<KU> {
         self.new.insert(AnyKey::new(key.clone()));
         let mut rx = {
-            let mut map = self.runner.map.lock();
+            let mut map = lock!(@sync self.runner.map);
             if let Some(handle) = map.get_mut(&AnyKey::new(self.key.clone())) {
                 let handle = handle.downcast_mut::<Handle<KD>>().expect("handle type mismatch");
                 if let Some(queue) = handle.dependencies.get_mut(&AnyKey::new(key.clone())) {
@@ -216,7 +216,7 @@ impl<KD: Key> Dependencies<KD> {
             }
         };
         let state = rx.recv().await.unwrap();
-        let mut map = self.runner.map.lock();
+        let mut map = lock!(@sync self.runner.map);
         let handle = map.get_mut(&AnyKey::new(self.key.clone())).unwrap();
         let handle = handle.downcast_mut::<Handle<KD>>().expect("handle type mismatch");
         let queue = handle.dependencies.get_mut(&AnyKey::new(key)).unwrap();
@@ -231,7 +231,7 @@ impl<KD: Key> Dependencies<KD> {
     /// If there is not already a known state for the key, this returns `None`.
     pub fn try_get_next<KU: Key>(&mut self, key: KU) -> Option<Next<KU>> {
         self.new.insert(AnyKey::new(key.clone()));
-        let mut map = self.runner.map.lock();
+        let mut map = lock!(@sync self.runner.map);
         if let Some(handle) = map.get_mut(&AnyKey::new(self.key.clone())) {
             let handle = handle.downcast_mut::<Handle<KD>>().expect("handle type mismatch");
             if let Some(queue) = handle.dependencies.get_mut(&AnyKey::new(key.clone())) {
@@ -273,7 +273,7 @@ struct Handle<K: Key> {
 
 #[derive(Debug, Default, Clone)]
 pub struct Runner {
-    map: Arc<Mutex<HashMap<AnyKey, Box<dyn Any + Send>>>>,
+    map: Arc<ParkingLotMutex<HashMap<AnyKey, Box<dyn Any + Send>>>>,
 }
 
 impl Runner {
@@ -286,7 +286,7 @@ impl Runner {
                 new: HashSet::default(),
             };
             let previous = {
-                let mut map = runner.map.lock();
+                let mut map = lock!(@sync runner.map);
                 let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else { return };
                 let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
                 if handle.updating { return }
@@ -295,7 +295,7 @@ impl Runner {
             };
             let Maintenance::Derived(get_state) = key.maintain() else { panic!("derived key turned into source") };
             if let Some(new_state) = get_state(&mut deps, previous).await {
-                let mut map = runner.map.lock();
+                let mut map = lock!(@sync runner.map);
                 let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else {
                     // no subscribers and no dependents
                     for dep in deps.new {
@@ -346,7 +346,7 @@ impl Runner {
                 tokio::spawn(async move {
                     while let Some(new_state) = stream.next().await {
                         println!("start_maintaining({key:?}): locking runner map");
-                        let mut map = self.map.lock();
+                        let mut map = lock!(@sync self.map);
                         println!("start_maintaining({key:?}): runner map locked");
                         let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else {
                             println!("start_maintaining({key:?}): key not in runner map");
@@ -379,7 +379,7 @@ impl Runner {
     }
 
     pub fn subscribe<K: Key>(&self, key: K) -> impl Stream<Item = K::State> + Unpin {
-        match self.map.lock().entry(AnyKey::new(key.clone())) {
+        match lock!(@sync self.map).entry(AnyKey::new(key.clone())) {
             hash_map::Entry::Occupied(entry) => {
                 let handle = entry.get().downcast_ref::<Handle<K>>().expect("handle type mismatch");
                 stream::iter(handle.state.clone())
