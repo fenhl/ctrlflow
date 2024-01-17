@@ -348,18 +348,24 @@ impl Runner {
                         println!("start_maintaining({key:?}): locking runner map");
                         let mut map = self.map.lock();
                         println!("start_maintaining({key:?}): runner map locked");
-                        let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else { break };
+                        let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else {
+                            println!("start_maintaining({key:?}): key not in runner map");
+                            break
+                        };
                         let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
                         handle.state = Some(new_state.clone());
                         let mut any_notified = false;
                         for dependent in &handle.dependents {
+                            println!("start_maintaining({key:?}): updating dependent {dependent:?}");
                             tokio::spawn((dependent.update)(&self, AnyKey::new(key.clone()), Box::new(new_state.clone())));
                             any_notified = true;
                         }
                         if handle.tx.send(new_state.clone()).is_ok() {
+                            println!("start_maintaining({key:?}): notified");
                             any_notified = true;
                         }
                         if !any_notified {
+                            println!("start_maintaining({key:?}): nothing notified, stopping");
                             map.remove(&AnyKey::new(key));
                             break
                         }
