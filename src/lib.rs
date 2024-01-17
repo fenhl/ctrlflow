@@ -52,7 +52,7 @@ pub fn filter_eq<K: Key>(f: impl for<'d> FnOnce(&'d mut Dependencies<K>, Option<
 where K::State: PartialEq {
     Maintenance::Derived(Box::new(|dependencies, previous| Box::pin(async move {
         let next = f(dependencies, previous.as_ref()).await;
-        previous.map_or(false, |previous| next != previous).then_some(next)
+        previous.map_or(true, |previous| next != previous).then_some(next)
     })))
 }
 
