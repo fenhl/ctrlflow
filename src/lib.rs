@@ -117,6 +117,7 @@ impl<KD: Key> Dependencies<KD> {
                         dependencies: HashMap::default(),
                         tx,
                     }));
+                    drop(map);
                     println!("{key:?}: starting maintenance");
                     self.runner.clone().start_maintaining(key.clone());
                     rx
@@ -168,6 +169,7 @@ impl<KD: Key> Dependencies<KD> {
                     dependents: iter::once(AnyKey::new(self.key.clone())).collect(),
                     dependencies: HashMap::default(),
                 }));
+                drop(map);
                 self.runner.clone().start_maintaining(key);
             }
         }
@@ -210,6 +212,7 @@ impl<KD: Key> Dependencies<KD> {
                         dependencies: HashMap::default(),
                         tx,
                     }));
+                    drop(map);
                     self.runner.clone().start_maintaining(key.clone());
                     rx
                 }
@@ -256,6 +259,7 @@ impl<KD: Key> Dependencies<KD> {
                     dependents: iter::once(AnyKey::new(self.key.clone())).collect(),
                     dependencies: HashMap::default(),
                 }));
+                drop(map);
                 self.runner.clone().start_maintaining(key);
             }
         }
