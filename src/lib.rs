@@ -82,9 +82,9 @@ impl<KD: Key> Dependencies<KD> {
         println!("ctrlflow::Dependencies::get_latest({self:?}, {key:?})");
         self.new.insert(AnyKey::new(key.clone()));
         let mut rx = {
-            println!("{key:?}: locking runner map");
+            println!("get_latest({key:?}): locking runner map");
             let mut map = self.runner.map.lock();
-            println!("{key:?}: runner map locked");
+            println!("get_latest({key:?}): runner map locked");
             if let Some(handle) = map.get_mut(&AnyKey::new(self.key.clone())) {
                 let handle = handle.downcast_mut::<Handle<KD>>().expect("handle type mismatch");
                 if let Some(queue) = handle.dependencies.get_mut(&AnyKey::new(key.clone())) {
@@ -345,7 +345,9 @@ impl Runner {
                 let mut stream = stream_fn(self.clone());
                 tokio::spawn(async move {
                     while let Some(new_state) = stream.next().await {
+                        println!("start_maintaining({key:?}): locking runner map");
                         let mut map = self.map.lock();
+                        println!("start_maintaining({key:?}): runner map locked");
                         let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else { break };
                         let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
                         handle.state = Some(new_state.clone());
