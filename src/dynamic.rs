@@ -11,10 +11,7 @@ use {
         },
         pin::Pin,
     },
-    futures::future::{
-        self,
-        Future,
-    },
+    futures::future::Future,
     if_chain::if_chain,
     log_lock::*,
     crate::{
@@ -25,11 +22,11 @@ use {
 };
 
 pub(crate) struct AnyKey {
-    data: Box<dyn Any + Send>,
-    eq: Box<dyn Fn(&dyn Any) -> bool + Send>,
+    data: Box<dyn Any + Send + Sync>,
+    eq: Box<dyn Fn(&dyn Any) -> bool + Send + Sync>,
     hash: u64,
-    pub(crate) update: Box<dyn Fn(&Runner, AnyKey, Box<dyn Any + Send>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>,
-    pub(crate) delete_dependent: Box<dyn Fn(&Runner, AnyKey) + Send>,
+    pub(crate) update: Box<dyn Fn(&Runner, AnyKey, Box<dyn Any + Send>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>,
+    pub(crate) delete_dependent: Box<dyn Fn(&Runner, AnyKey) + Send + Sync>,
 }
 
 impl AnyKey {
@@ -42,18 +39,28 @@ impl AnyKey {
             data: Box::new(key),
             eq: Box::new(move |other| other.downcast_ref::<K>().map_or(false, |other| self_eq == *other)),
             hash: BuildHasherDefault::<DefaultHasher>::default().hash_one(self_hash),
-            update: Box::new(move |runner, dependency_key, dependency_value| if_chain! {
-                if let Some(handle) = lock!(@sync runner.map).get_mut(&AnyKey::new(self_update.clone()));
-                let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
-                if let Some(queue) = handle.dependencies.get_mut(&dependency_key);
-                then {
-                    queue.push_back(dependency_value);
-                    println!("AnyKey.update: updating derived state");
-                    runner.update_derived_state(self_update.clone())
-                } else {
-                    println!("AnyKey.update: nothing to update");
-                    Box::pin(future::ready(()))
-                }
+            update: Box::new(move |runner, dependency_key, dependency_value| {
+                let runner = runner.clone();
+                let self_update = self_update.clone();
+                Box::pin(async move {
+                    let should_update = if_chain! {
+                        if let Some(handle) = lock!(@sync runner.map).get_mut(&AnyKey::new(self_update.clone()));
+                        let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
+                        if let Some(queue) = handle.dependencies.get_mut(&dependency_key);
+                        then {
+                            queue.push_back(dependency_value);
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if should_update {
+                        println!("AnyKey.update: updating derived state");
+                        runner.update_derived_state(self_update.clone()).await;
+                    } else {
+                        println!("AnyKey.update: nothing to update");
+                    }
+                })
             }),
             delete_dependent: Box::new(move |runner, dependent_key| if let Some(handle) = lock!(@sync runner.map).get_mut(&AnyKey::new(self_delete_dependent.clone())) {
                 let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");

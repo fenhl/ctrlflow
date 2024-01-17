@@ -36,7 +36,7 @@ mod dynamic;
 
 const CHANNEL_CAPACITY: usize = 256;
 
-pub trait Key: fmt::Debug + Clone + Eq + Hash + Send + 'static {
+pub trait Key: fmt::Debug + Clone + Eq + Hash + Send + Sync + 'static {
     type State: Clone + Send + Sync;
 
     /// This function must consistently return the same variant of [`Maintenance`] for the same key, i.e. a source must never become derived or vice versa.
