@@ -47,8 +47,10 @@ impl AnyKey {
                 if let Some(queue) = handle.dependencies.get_mut(&dependency_key);
                 then {
                     queue.push_back(dependency_value);
+                    println!("AnyKey.update: updating derived state");
                     runner.update_derived_state(self_update.clone())
                 } else {
+                    println!("AnyKey.update: nothing to update");
                     Box::pin(future::ready(()))
                 }
             }),

@@ -363,6 +363,8 @@ impl Runner {
                         if handle.tx.send(new_state.clone()).is_ok() {
                             println!("start_maintaining({key:?}): notified");
                             any_notified = true;
+                        } else {
+                            println!("start_maintaining({key:?}): no channel to notify");
                         }
                         if !any_notified {
                             println!("start_maintaining({key:?}): nothing notified, stopping");
