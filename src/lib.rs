@@ -378,7 +378,22 @@ impl Runner {
                     map.remove(&AnyKey::new(key));
                 }
             } else {
-                println!("update_derived_state({key:?}): no new state");
+                println!("update_derived_state({key:?}): no new state, locking runner map");
+                let mut map = lock!(@sync runner.map);
+                println!("update_derived_state({key:?}): runner map locked");
+                let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else {
+                    // no subscribers and no dependents
+                    for dep in deps.new {
+                        (dep.delete_dependent)(&runner, AnyKey::new(key.clone()));
+                    }
+                    return
+                };
+                let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
+                handle.updating = false;
+                if handle.dependencies.values().any(|queue| !queue.is_empty()) {
+                    println!("update_derived_state({key:?}): reupdating for changed dependencies");
+                    tokio::spawn(runner.update_derived_state(key));
+                }
             }
         })
     }
