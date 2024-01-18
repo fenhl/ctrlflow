@@ -302,11 +302,13 @@ impl Runner {
     fn update_derived_state<K: Key>(&self, key: K) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         let runner = self.clone();
         Box::pin(async move {
+            println!("update_derived_state({key:?}): initializing");
             let mut deps = Dependencies {
                 runner: runner.clone(),
                 key: key.clone(),
                 new: HashSet::default(),
             };
+            println!("update_derived_state({key:?}): getting previous state");
             let previous = {
                 let mut map = lock!(@sync runner.map);
                 let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else { return };
@@ -315,9 +317,13 @@ impl Runner {
                 handle.updating = true;
                 handle.state.clone()
             };
+            println!("update_derived_state({key:?}): getting maintenance");
             let Maintenance::Derived(get_state) = key.maintain() else { panic!("derived key turned into source") };
+            println!("update_derived_state({key:?}): getting state");
             if let Some(new_state) = get_state(&mut deps, previous).await {
+                println!("update_derived_state({key:?}): locking runner map");
                 let mut map = lock!(@sync runner.map);
+                println!("update_derived_state({key:?}): runner map locked");
                 let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else {
                     // no subscribers and no dependents
                     for dep in deps.new {
@@ -357,6 +363,8 @@ impl Runner {
                     }
                     map.remove(&AnyKey::new(key));
                 }
+            } else {
+                println!("update_derived_state({key:?}): no new state");
             }
         })
     }
