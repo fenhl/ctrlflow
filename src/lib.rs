@@ -310,10 +310,18 @@ impl Runner {
             };
             println!("update_derived_state({key:?}): getting previous state");
             let previous = {
+                println!("update_derived_state({key:?}): locking runner map");
                 let mut map = lock!(@sync runner.map);
-                let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else { return };
+                println!("update_derived_state({key:?}): runner map locked");
+                let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else {
+                    println!("update_derived_state({key:?}): key not in runner map");
+                    return
+                };
                 let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
-                if handle.updating { return }
+                if handle.updating {
+                    println!("update_derived_state({key:?}): already updating");
+                    return
+                }
                 handle.updating = true;
                 handle.state.clone()
             };
