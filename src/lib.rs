@@ -48,15 +48,18 @@ pub enum Maintenance<K: Key> {
     Derived(Box<dyn for<'d> FnOnce(&'d mut Dependencies<K>, Option<K::State>) -> Pin<Box<dyn Future<Output = Option<K::State>> + Send + 'd>> + Send>),
 }
 
-pub fn filter_eq<K: Key>(f: impl for<'d> FnOnce(&'d mut Dependencies<K>, Option<&K::State>) -> Pin<Box<dyn Future<Output = K::State> + Send + 'd>> + Send + 'static) -> Maintenance<K>
+pub fn filter_eq<K: Key>(key: K, f: impl for<'d> FnOnce(&'d mut Dependencies<K>, Option<&K::State>) -> Pin<Box<dyn Future<Output = K::State> + Send + 'd>> + Send + 'static) -> Maintenance<K>
 where K::State: PartialEq {
     Maintenance::Derived(Box::new(|dependencies, previous| Box::pin(async move {
         let next = f(dependencies, previous.as_ref()).await;
-        previous.map_or(true, |previous| if next == previous {
-            println!("filtering equal state: {next:?}");
+        previous.map(|previous| if next == previous {
+            println!("filter_eq({key:?}): filtering equal state: {next:?}");
             false
         } else {
-            println!("not filtering equal state: {next:?}");
+            println!("filter_eq({key:?}): got new state: {next:?}");
+            true
+        }).unwrap_or_else(|| {
+            println!("filter_eq({key:?}): got initial state: {next:?}");
             true
         }).then_some(next)
     })))
