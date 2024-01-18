@@ -343,11 +343,15 @@ impl Runner {
                 handle.state = Some(new_state.clone());
                 let mut any_notified = false;
                 for dependent in &handle.dependents {
+                    println!("update_derived_state({key:?}): updating dependent {dependent:?}");
                     tokio::spawn((dependent.update)(&runner, AnyKey::new(key.clone()), Box::new(new_state.clone())));
                     any_notified = true;
                 }
                 if handle.tx.send(new_state.clone()).is_ok() {
+                    println!("update_derived_state({key:?}): notified");
                     any_notified = true;
+                } else {
+                    println!("update_derived_state({key:?}): no channel to notify");
                 }
                 if any_notified {
                     handle.dependencies.retain(|dep, _| if deps.new.contains(dep) {
@@ -363,9 +367,11 @@ impl Runner {
                     }
                     handle.updating = false;
                     if handle.dependencies.values().any(|queue| !queue.is_empty()) {
+                        println!("update_derived_state({key:?}): reupdating for changed dependencies");
                         tokio::spawn(runner.update_derived_state(key));
                     }
                 } else {
+                    println!("update_derived_state({key:?}): nothing notified, stopping");
                     for dep in handle.dependencies.keys().chain(&deps.new) {
                         (dep.delete_dependent)(&runner, AnyKey::new(key.clone()));
                     }
