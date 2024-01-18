@@ -48,7 +48,7 @@ pub enum Maintenance<K: Key> {
     Derived(Box<dyn for<'d> FnOnce(&'d mut Dependencies<K>, Option<K::State>) -> Pin<Box<dyn Future<Output = Option<K::State>> + Send + 'd>> + Send>),
 }
 
-pub fn filter_eq<K: Key>(key: K, f: impl for<'d> FnOnce(&'d mut Dependencies<K>, Option<&K::State>) -> Pin<Box<dyn Future<Output = K::State> + Send + 'd>> + Send + 'static) -> Maintenance<K>
+pub fn filter_eq<K: Key>(f: impl for<'d> FnOnce(&'d mut Dependencies<K>, Option<&K::State>) -> Pin<Box<dyn Future<Output = K::State> + Send + 'd>> + Send + 'static) -> Maintenance<K>
 where K::State: PartialEq {
     Maintenance::Derived(Box::new(|dependencies, previous| Box::pin(async move {
         let next = f(dependencies, previous.as_ref()).await;
@@ -61,16 +61,7 @@ where K::State: PartialEq {
             next_prefix.truncate(cutoff);
             next_prefix.push('…');
         }
-        previous.map(|previous| if next == previous {
-            println!("filter_eq({key:?}): filtering equal state: {next_prefix}");
-            false
-        } else {
-            println!("filter_eq({key:?}): got new state: {next_prefix}");
-            true
-        }).unwrap_or_else(|| {
-            println!("filter_eq({key:?}): got initial state: {next_prefix}");
-            true
-        }).then_some(next)
+        previous.map_or(true, |previous| next != previous).then_some(next)
     })))
 }
 
@@ -97,19 +88,15 @@ impl<KD: Key> Dependencies<KD> {
     ///
     /// If there is not already a known state for the key, this waits until it is computed.
     pub async fn get_latest<KU: Key>(&mut self, key: KU) -> KU::State {
-        println!("ctrlflow::Dependencies::get_latest({self:?}, {key:?})");
         self.new.insert(AnyKey::new(key.clone()));
         let mut rx = {
-            println!("get_latest({key:?}): locking runner map");
             let mut map = lock!(@sync self.runner.map);
-            println!("get_latest({key:?}): runner map locked");
             if let Some(handle) = map.get_mut(&AnyKey::new(self.key.clone())) {
                 let handle = handle.downcast_mut::<Handle<KD>>().expect("handle type mismatch");
                 if let Some(queue) = handle.dependencies.get_mut(&AnyKey::new(key.clone())) {
                     let state = queue.pop_back();
                     queue.clear();
                     if let Some(state) = state {
-                        println!("{key:?}: entry already present");
                         return *state.downcast::<KU::State>().expect("queued dependency type mismatch")
                     }
                 }
@@ -119,10 +106,8 @@ impl<KD: Key> Dependencies<KD> {
                     let handle = entry.get_mut().downcast_mut::<Handle<KU>>().expect("handle type mismatch");
                     handle.dependents.insert(AnyKey::new(self.key.clone()));
                     if let Some(ref state) = handle.state {
-                        println!("{key:?}: state already present");
                         return state.clone()
                     } else {
-                        println!("{key:?}: subscribing");
                         handle.tx.subscribe()
                     }
                 }
@@ -136,21 +121,16 @@ impl<KD: Key> Dependencies<KD> {
                         tx,
                     }));
                     drop(map);
-                    println!("{key:?}: starting maintenance");
-                    self.runner.clone().start_maintaining(key.clone());
+                    self.runner.clone().start_maintaining(key);
                     rx
                 }
             }
         };
-        println!("{key:?}: waiting for next state");
         loop {
             match rx.recv().await {
-                Ok(state) => {
-                    println!("{key:?}: got state");
-                    break state
-                }
+                Ok(state) => break state,
                 Err(broadcast::error::RecvError::Closed) => panic!("channel closed with active dependency"),
-                Err(broadcast::error::RecvError::Lagged(_)) => println!("{key:?}: lagged"),
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
             }
         }
     }
@@ -302,36 +282,22 @@ impl Runner {
     fn update_derived_state<K: Key>(&self, key: K) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         let runner = self.clone();
         Box::pin(async move {
-            println!("update_derived_state({key:?}): initializing");
             let mut deps = Dependencies {
                 runner: runner.clone(),
                 key: key.clone(),
                 new: HashSet::default(),
             };
-            println!("update_derived_state({key:?}): getting previous state");
             let previous = {
-                println!("update_derived_state({key:?}): locking runner map");
                 let mut map = lock!(@sync runner.map);
-                println!("update_derived_state({key:?}): runner map locked");
-                let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else {
-                    println!("update_derived_state({key:?}): key not in runner map");
-                    return
-                };
+                let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else { return };
                 let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
-                if handle.updating {
-                    println!("update_derived_state({key:?}): already updating");
-                    return
-                }
+                if handle.updating { return }
                 handle.updating = true;
                 handle.state.clone()
             };
-            println!("update_derived_state({key:?}): getting maintenance");
             let Maintenance::Derived(get_state) = key.maintain() else { panic!("derived key turned into source") };
-            println!("update_derived_state({key:?}): getting state");
             if let Some(new_state) = get_state(&mut deps, previous).await {
-                println!("update_derived_state({key:?}): locking runner map");
                 let mut map = lock!(@sync runner.map);
-                println!("update_derived_state({key:?}): runner map locked");
                 let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else {
                     // no subscribers and no dependents
                     for dep in deps.new {
@@ -343,15 +309,11 @@ impl Runner {
                 handle.state = Some(new_state.clone());
                 let mut any_notified = false;
                 for dependent in &handle.dependents {
-                    println!("update_derived_state({key:?}): updating dependent {dependent:?}");
                     tokio::spawn((dependent.update)(&runner, AnyKey::new(key.clone()), Box::new(new_state.clone())));
                     any_notified = true;
                 }
                 if handle.tx.send(new_state.clone()).is_ok() {
-                    println!("update_derived_state({key:?}): notified");
                     any_notified = true;
-                } else {
-                    println!("update_derived_state({key:?}): no channel to notify");
                 }
                 if any_notified {
                     handle.dependencies.retain(|dep, _| if deps.new.contains(dep) {
@@ -367,20 +329,16 @@ impl Runner {
                     }
                     handle.updating = false;
                     if handle.dependencies.values().any(|queue| !queue.is_empty()) {
-                        println!("update_derived_state({key:?}): reupdating for changed dependencies");
                         tokio::spawn(runner.update_derived_state(key));
                     }
                 } else {
-                    println!("update_derived_state({key:?}): nothing notified, stopping");
                     for dep in handle.dependencies.keys().chain(&deps.new) {
                         (dep.delete_dependent)(&runner, AnyKey::new(key.clone()));
                     }
                     map.remove(&AnyKey::new(key));
                 }
             } else {
-                println!("update_derived_state({key:?}): no new state, locking runner map");
                 let mut map = lock!(@sync runner.map);
-                println!("update_derived_state({key:?}): runner map locked");
                 let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else {
                     // no subscribers and no dependents
                     for dep in deps.new {
@@ -391,7 +349,6 @@ impl Runner {
                 let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
                 handle.updating = false;
                 if handle.dependencies.values().any(|queue| !queue.is_empty()) {
-                    println!("update_derived_state({key:?}): reupdating for changed dependencies");
                     tokio::spawn(runner.update_derived_state(key));
                 }
             }
@@ -404,29 +361,19 @@ impl Runner {
                 let mut stream = stream_fn(self.clone());
                 tokio::spawn(async move {
                     while let Some(new_state) = stream.next().await {
-                        println!("start_maintaining({key:?}): locking runner map");
                         let mut map = lock!(@sync self.map);
-                        println!("start_maintaining({key:?}): runner map locked");
-                        let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else {
-                            println!("start_maintaining({key:?}): key not in runner map");
-                            break
-                        };
+                        let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else { break };
                         let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
                         handle.state = Some(new_state.clone());
                         let mut any_notified = false;
                         for dependent in &handle.dependents {
-                            println!("start_maintaining({key:?}): updating dependent {dependent:?}");
                             tokio::spawn((dependent.update)(&self, AnyKey::new(key.clone()), Box::new(new_state.clone())));
                             any_notified = true;
                         }
                         if handle.tx.send(new_state.clone()).is_ok() {
-                            println!("start_maintaining({key:?}): notified");
                             any_notified = true;
-                        } else {
-                            println!("start_maintaining({key:?}): no channel to notify");
                         }
                         if !any_notified {
-                            println!("start_maintaining({key:?}): nothing notified, stopping");
                             map.remove(&AnyKey::new(key));
                             break
                         }

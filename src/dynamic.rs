@@ -55,10 +55,7 @@ impl AnyKey {
                         }
                     };
                     if should_update {
-                        println!("AnyKey.update: updating derived state");
                         runner.update_derived_state(self_update.clone()).await;
-                    } else {
-                        println!("AnyKey.update: nothing to update");
                     }
                 })
             }),
