@@ -37,7 +37,7 @@ mod dynamic;
 const CHANNEL_CAPACITY: usize = 256;
 
 pub trait Key: fmt::Debug + Clone + Eq + Hash + Send + Sync + 'static {
-    type State: Clone + Send + Sync;
+    type State: fmt::Debug + Clone + Send + Sync;
 
     /// This function must consistently return the same variant of [`Maintenance`] for the same key, i.e. a source must never become derived or vice versa.
     fn maintain(&self) -> Maintenance<Self>;
@@ -52,7 +52,13 @@ pub fn filter_eq<K: Key>(f: impl for<'d> FnOnce(&'d mut Dependencies<K>, Option<
 where K::State: PartialEq {
     Maintenance::Derived(Box::new(|dependencies, previous| Box::pin(async move {
         let next = f(dependencies, previous.as_ref()).await;
-        previous.map_or(true, |previous| next != previous).then_some(next)
+        previous.map_or(true, |previous| if next == previous {
+            println!("filtering equal state: {next:?}");
+            false
+        } else {
+            println!("not filtering equal state: {next:?}");
+            true
+        }).then_some(next)
     })))
 }
 
