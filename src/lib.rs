@@ -87,50 +87,54 @@ impl<KD: Key> Dependencies<KD> {
     /// Returns the current state of the given key.
     ///
     /// If there is not already a known state for the key, this waits until it is computed.
-    pub async fn get_latest<KU: Key>(&mut self, key: KU) -> KU::State {
+    pub fn get_latest<KU: Key>(&mut self, key: KU) -> impl Future<Output = KU::State> {
         self.new.insert(AnyKey::new(key.clone()));
-        let mut rx = {
-            let mut map = lock!(@sync self.runner.map);
-            if let Some(handle) = map.get_mut(&AnyKey::new(self.key.clone())) {
-                let handle = handle.downcast_mut::<Handle<KD>>().expect("handle type mismatch");
-                if let Some(queue) = handle.dependencies.get_mut(&AnyKey::new(key.clone())) {
-                    let state = queue.pop_back();
-                    queue.clear();
-                    if let Some(state) = state {
-                        return *state.downcast::<KU::State>().expect("queued dependency type mismatch")
+        let runner = self.runner.clone();
+        let dependency_key = self.key.clone();
+        async move {
+            let mut rx = {
+                let mut map = lock!(@sync runner.map);
+                if let Some(handle) = map.get_mut(&AnyKey::new(dependency_key.clone())) {
+                    let handle = handle.downcast_mut::<Handle<KD>>().expect("handle type mismatch");
+                    if let Some(queue) = handle.dependencies.get_mut(&AnyKey::new(key.clone())) {
+                        let state = queue.pop_back();
+                        queue.clear();
+                        if let Some(state) = state {
+                            return *state.downcast::<KU::State>().expect("queued dependency type mismatch")
+                        }
                     }
                 }
-            }
-            match map.entry(AnyKey::new(key.clone())) {
-                hash_map::Entry::Occupied(mut entry) => {
-                    let handle = entry.get_mut().downcast_mut::<Handle<KU>>().expect("handle type mismatch");
-                    handle.dependents.insert(AnyKey::new(self.key.clone()));
-                    if let Some(ref state) = handle.state {
-                        return state.clone()
-                    } else {
-                        handle.tx.subscribe()
+                match map.entry(AnyKey::new(key.clone())) {
+                    hash_map::Entry::Occupied(mut entry) => {
+                        let handle = entry.get_mut().downcast_mut::<Handle<KU>>().expect("handle type mismatch");
+                        handle.dependents.insert(AnyKey::new(dependency_key));
+                        if let Some(ref state) = handle.state {
+                            return state.clone()
+                        } else {
+                            handle.tx.subscribe()
+                        }
+                    }
+                    hash_map::Entry::Vacant(entry) => {
+                        let (tx, rx) = broadcast::channel(CHANNEL_CAPACITY);
+                        entry.insert(Box::new(Handle::<KU> {
+                            updating: false,
+                            state: None,
+                            dependents: iter::once(AnyKey::new(dependency_key)).collect(),
+                            dependencies: HashMap::default(),
+                            tx,
+                        }));
+                        drop(map);
+                        runner.clone().start_maintaining(key);
+                        rx
                     }
                 }
-                hash_map::Entry::Vacant(entry) => {
-                    let (tx, rx) = broadcast::channel(CHANNEL_CAPACITY);
-                    entry.insert(Box::new(Handle::<KU> {
-                        updating: false,
-                        state: None,
-                        dependents: iter::once(AnyKey::new(self.key.clone())).collect(),
-                        dependencies: HashMap::default(),
-                        tx,
-                    }));
-                    drop(map);
-                    self.runner.clone().start_maintaining(key);
-                    rx
+            };
+            loop {
+                match rx.recv().await {
+                    Ok(state) => break state,
+                    Err(broadcast::error::RecvError::Closed) => panic!("channel closed with active dependency"),
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
                 }
-            }
-        };
-        loop {
-            match rx.recv().await {
-                Ok(state) => break state,
-                Err(broadcast::error::RecvError::Closed) => panic!("channel closed with active dependency"),
-                Err(broadcast::error::RecvError::Lagged(_)) => {}
             }
         }
     }
@@ -179,50 +183,54 @@ impl<KD: Key> Dependencies<KD> {
     /// To ensure that no intermediate states are skipped, this must be called each time, and must not be mixed with `get_latest` or `try_get_latest` calls on the same key.
     ///
     /// If there is not already a known state for the key, this waits until it is computed.
-    pub async fn get_next<KU: Key>(&mut self, key: KU) -> Next<KU> {
+    pub fn get_next<KU: Key>(&mut self, key: KU) -> impl Future<Output = Next<KU>> {
         self.new.insert(AnyKey::new(key.clone()));
-        let mut rx = {
-            let mut map = lock!(@sync self.runner.map);
-            if let Some(handle) = map.get_mut(&AnyKey::new(self.key.clone())) {
-                let handle = handle.downcast_mut::<Handle<KD>>().expect("handle type mismatch");
-                if let Some(queue) = handle.dependencies.get_mut(&AnyKey::new(key.clone())) {
-                    if let Some(state) = queue.pop_front() {
-                        return Next::New(*state.downcast::<KU::State>().expect("queued dependency type mismatch"))
+        let runner = self.runner.clone();
+        let dependency_key = self.key.clone();
+        async move {
+            let mut rx = {
+                let mut map = lock!(@sync runner.map);
+                if let Some(handle) = map.get_mut(&AnyKey::new(dependency_key.clone())) {
+                    let handle = handle.downcast_mut::<Handle<KD>>().expect("handle type mismatch");
+                    if let Some(queue) = handle.dependencies.get_mut(&AnyKey::new(key.clone())) {
+                        if let Some(state) = queue.pop_front() {
+                            return Next::New(*state.downcast::<KU::State>().expect("queued dependency type mismatch"))
+                        }
                     }
                 }
-            }
-            match map.entry(AnyKey::new(key.clone())) {
-                hash_map::Entry::Occupied(mut entry) => {
-                    let handle = entry.get_mut().downcast_mut::<Handle<KU>>().expect("handle type mismatch");
-                    handle.dependents.insert(AnyKey::new(self.key.clone()));
-                    if let Some(ref state) = handle.state {
-                        return Next::Old(state.clone())
-                    } else {
-                        handle.tx.subscribe()
+                match map.entry(AnyKey::new(key.clone())) {
+                    hash_map::Entry::Occupied(mut entry) => {
+                        let handle = entry.get_mut().downcast_mut::<Handle<KU>>().expect("handle type mismatch");
+                        handle.dependents.insert(AnyKey::new(dependency_key.clone()));
+                        if let Some(ref state) = handle.state {
+                            return Next::Old(state.clone())
+                        } else {
+                            handle.tx.subscribe()
+                        }
+                    }
+                    hash_map::Entry::Vacant(entry) => {
+                        let (tx, rx) = broadcast::channel(CHANNEL_CAPACITY);
+                        entry.insert(Box::new(Handle::<KU> {
+                            updating: false,
+                            state: None,
+                            dependents: iter::once(AnyKey::new(dependency_key.clone())).collect(),
+                            dependencies: HashMap::default(),
+                            tx,
+                        }));
+                        drop(map);
+                        runner.clone().start_maintaining(key.clone());
+                        rx
                     }
                 }
-                hash_map::Entry::Vacant(entry) => {
-                    let (tx, rx) = broadcast::channel(CHANNEL_CAPACITY);
-                    entry.insert(Box::new(Handle::<KU> {
-                        updating: false,
-                        state: None,
-                        dependents: iter::once(AnyKey::new(self.key.clone())).collect(),
-                        dependencies: HashMap::default(),
-                        tx,
-                    }));
-                    drop(map);
-                    self.runner.clone().start_maintaining(key.clone());
-                    rx
-                }
-            }
-        };
-        let state = rx.recv().await.unwrap();
-        let mut map = lock!(@sync self.runner.map);
-        let handle = map.get_mut(&AnyKey::new(self.key.clone())).unwrap();
-        let handle = handle.downcast_mut::<Handle<KD>>().expect("handle type mismatch");
-        let queue = handle.dependencies.get_mut(&AnyKey::new(key)).unwrap();
-        queue.pop_front().unwrap(); // don't report this state twice; calling `dependent.update` before `handle.tx.send` ensures this state is already present
-        Next::New(state)
+            };
+            let state = rx.recv().await.unwrap();
+            let mut map = lock!(@sync runner.map);
+            let handle = map.get_mut(&AnyKey::new(dependency_key)).unwrap();
+            let handle = handle.downcast_mut::<Handle<KD>>().expect("handle type mismatch");
+            let queue = handle.dependencies.get_mut(&AnyKey::new(key)).unwrap();
+            queue.pop_front().unwrap(); // don't report this state twice; calling `dependent.update` before `handle.tx.send` ensures this state is already present
+            Next::New(state)
+        }
     }
 
     /// Returns the next state of the given key.
