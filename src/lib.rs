@@ -52,15 +52,6 @@ pub fn filter_eq<K: Key>(f: impl for<'d> FnOnce(&'d mut Dependencies<K>, Option<
 where K::State: PartialEq {
     Maintenance::Derived(Box::new(|dependencies, previous| Box::pin(async move {
         let next = f(dependencies, previous.as_ref()).await;
-        let mut next_prefix = format!("{next:?}");
-        if next_prefix.len() > 128 {
-            let mut cutoff = 128;
-            while !next_prefix.is_char_boundary(cutoff) {
-                cutoff -= 1;
-            }
-            next_prefix.truncate(cutoff);
-            next_prefix.push('…');
-        }
         previous.map_or(true, |previous| next != previous).then_some(next)
     })))
 }
