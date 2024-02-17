@@ -22,9 +22,13 @@ use {
         },
         stream::{
             self,
-            Stream,
             StreamExt as _,
         },
+    },
+    infinite_stream::{
+        InfiniteStream,
+        InfiniteStreamExt as _,
+        StreamExt as _,
     },
     log_lock::*,
     tokio::sync::broadcast,
@@ -44,7 +48,7 @@ pub trait Key: fmt::Debug + Clone + Eq + Hash + Send + Sync + 'static {
 }
 
 pub enum Maintenance<K: Key> {
-    Stream(Box<dyn FnOnce(Runner) -> Pin<Box<dyn Stream<Item = K::State> + Send>> + Send>),
+    Stream(Box<dyn FnOnce(Runner) -> Pin<Box<dyn InfiniteStream<Item = K::State> + Send>> + Send>),
     Derived(Box<dyn for<'d> FnOnce(&'d mut Dependencies<K>, Option<K::State>) -> Pin<Box<dyn Future<Output = Option<K::State>> + Send + 'd>> + Send>),
 }
 
@@ -359,7 +363,8 @@ impl Runner {
             Maintenance::Stream(stream_fn) => {
                 let mut stream = stream_fn(self.clone());
                 tokio::spawn(async move {
-                    while let Some(new_state) = stream.next().await {
+                    loop {
+                        let new_state = stream.next().await;
                         let mut map = lock!(@sync self.map);
                         let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else { break };
                         let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
@@ -383,12 +388,13 @@ impl Runner {
         }
     }
 
-    pub fn subscribe<K: Key>(&self, key: K) -> impl Stream<Item = K::State> + Unpin {
+    pub fn subscribe<K: Key>(&self, key: K) -> impl InfiniteStream<Item = K::State> + Unpin {
         match lock!(@sync self.map).entry(AnyKey::new(key.clone())) {
             hash_map::Entry::Occupied(entry) => {
                 let handle = entry.get().downcast_ref::<Handle<K>>().expect("handle type mismatch");
                 stream::iter(handle.state.clone())
                     .chain(BroadcastStream::new(handle.tx.subscribe()).filter_map(|res| future::ready(res.ok())))
+                    .expect("broadcast ended")
                     .left_stream()
             }
             hash_map::Entry::Vacant(entry) => {
@@ -401,7 +407,7 @@ impl Runner {
                     tx,
                 }));
                 self.clone().start_maintaining(key);
-                BroadcastStream::new(rx).filter_map(|res| future::ready(res.ok())).right_stream()
+                BroadcastStream::new(rx).filter_map(|res| future::ready(res.ok())).expect("broadcast ended").right_stream()
             },
         }
     }

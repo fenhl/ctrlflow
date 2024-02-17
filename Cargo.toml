@@ -17,6 +17,7 @@ warnings = "deny"
 [dependencies]
 futures = "0.3.28"
 if_chain = "1.0.2"
+infinite-stream = { git = "https://github.com/fenhl/infinite-stream", branch = "main" }
 log-lock = { git = "https://github.com/fenhl/log-lock", branch = "main" }
 tokio = { version = "1.29.1", features = ["rt-multi-thread", "sync"] }
 tokio-stream = { version = "0.1.14", features = ["sync"] }
