@@ -43,8 +43,8 @@ impl AnyKey {
                 let runner = runner.clone();
                 let self_update = self_update.clone();
                 Box::pin(async move {
-                    let should_update = if_chain! {
-                        if let Some(handle) = lock!(@sync runner.map).get_mut(&AnyKey::new(self_update.clone()));
+                    let should_update = lock!(@sync map = runner.map; if_chain! {
+                        if let Some(handle) = map.get_mut(&AnyKey::new(self_update.clone()));
                         let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
                         if let Some(queue) = handle.dependencies.get_mut(&dependency_key);
                         then {
@@ -53,16 +53,16 @@ impl AnyKey {
                         } else {
                             false
                         }
-                    };
+                    });
                     if should_update {
                         runner.update_derived_state(self_update.clone()).await;
                     }
                 })
             }),
-            delete_dependent: Box::new(move |runner, dependent_key| if let Some(handle) = lock!(@sync runner.map).get_mut(&AnyKey::new(self_delete_dependent.clone())) {
+            delete_dependent: Box::new(move |runner, dependent_key| lock!(@sync map = runner.map; if let Some(handle) = map.get_mut(&AnyKey::new(self_delete_dependent.clone())) {
                 let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
                 handle.dependents.remove(&dependent_key);
-            }),
+            })),
         }
     }
 }
