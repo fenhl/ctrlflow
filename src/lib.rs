@@ -312,54 +312,44 @@ impl Runner {
             let Maintenance::Derived(get_state) = key.maintain() else { panic!("derived key turned into source") };
             if let Some(new_state) = get_state(&mut deps, previous).await {
                 lock!(@sync map = runner.map; {
-                    println!("got derived state, getting handle");
                     let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else {
                         // no subscribers and no dependents
-                        println!("no subscribers and no dependents, deleting this key from dependencies");
                         for dep in deps.new {
-                            (dep.delete_dependent)(&runner, AnyKey::new(key.clone()));
+                            (dep.delete_dependent)(&mut map, AnyKey::new(key.clone()));
                         }
                         unlock!();
                         return
                     };
                     let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
-                    println!("got handle, updating state");
                     handle.state = Some(new_state.clone());
                     let mut any_notified = false;
-                    println!("updating dependents");
                     for dependent in &handle.dependents {
                         tokio::spawn((dependent.update)(&runner, AnyKey::new(key.clone()), Box::new(new_state.clone())));
                         any_notified = true;
                     }
-                    println!("sending state to subscribers");
                     if handle.tx.send(new_state.clone()).is_ok() {
                         any_notified = true;
                     }
                     if any_notified {
-                        println!("cleaning up dependencies");
-                        handle.dependencies.retain(|dep, _| if deps.new.contains(dep) {
-                            true
-                        } else {
-                            (dep.delete_dependent)(&runner, AnyKey::new(key.clone()));
-                            false
-                        });
-                        println!("setting up new dependencies");
+                        let dependencies_to_delete;
+                        (handle.dependencies, dependencies_to_delete) = handle.dependencies.drain().partition(|(dep, _)| deps.new.contains(dep));
                         for dep in deps.new {
                             if let hash_map::Entry::Vacant(entry) = handle.dependencies.entry(dep) {
                                 entry.insert(VecDeque::default());
                             }
                         }
                         handle.updating = false;
-                        println!("dependencies already changed again, re-running udpate_derived_state");
-                        if handle.dependencies.values().any(|queue| !queue.is_empty()) {
+                        let re_run = handle.dependencies.values().any(|queue| !queue.is_empty());
+                        for (dep, _) in dependencies_to_delete {
+                            (dep.delete_dependent)(&mut map, AnyKey::new(key.clone()));
+                        }
+                        if re_run {
                             tokio::spawn(runner.update_derived_state(key));
                         }
                     } else {
-                        println!("no one notified, deleting this key from dependencies");
-                        for dep in handle.dependencies.keys().chain(&deps.new) {
-                            (dep.delete_dependent)(&runner, AnyKey::new(key.clone()));
+                        for dep in handle.dependencies.drain().map(|(key, _)| key).chain(deps.new).collect::<Vec<_>>() {
+                            (dep.delete_dependent)(&mut map, AnyKey::new(key.clone()));
                         }
-                        println!("no one notified, deleting this key from map");
                         map.remove(&AnyKey::new(key));
                     }
                 });
@@ -368,7 +358,7 @@ impl Runner {
                     let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else {
                         // no subscribers and no dependents
                         for dep in deps.new {
-                            (dep.delete_dependent)(&runner, AnyKey::new(key.clone()));
+                            (dep.delete_dependent)(&mut map, AnyKey::new(key.clone()));
                         }
                         unlock!();
                         return

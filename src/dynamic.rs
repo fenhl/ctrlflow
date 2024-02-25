@@ -1,11 +1,12 @@
 use {
     std::{
         any::Any,
-        collections::hash_map::DefaultHasher,
+        collections::HashMap,
         fmt,
         hash::{
             BuildHasher as _,
             BuildHasherDefault,
+            DefaultHasher,
             Hash,
             Hasher,
         },
@@ -26,7 +27,7 @@ pub(crate) struct AnyKey {
     eq: Box<dyn Fn(&dyn Any) -> bool + Send + Sync>,
     hash: u64,
     pub(crate) update: Box<dyn Fn(&Runner, AnyKey, Box<dyn Any + Send>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>,
-    pub(crate) delete_dependent: Box<dyn Fn(&Runner, AnyKey) + Send + Sync>,
+    pub(crate) delete_dependent: Box<dyn Fn(&mut HashMap<AnyKey, Box<dyn Any + Send>>, AnyKey) + Send + Sync>,
 }
 
 impl AnyKey {
@@ -59,10 +60,10 @@ impl AnyKey {
                     }
                 })
             }),
-            delete_dependent: Box::new(move |runner, dependent_key| lock!(@sync map = runner.map; if let Some(handle) = map.get_mut(&AnyKey::new(self_delete_dependent.clone())) {
+            delete_dependent: Box::new(move |map, dependent_key| if let Some(handle) = map.get_mut(&AnyKey::new(self_delete_dependent.clone())) {
                 let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
                 handle.dependents.remove(&dependent_key);
-            })),
+            }),
         }
     }
 }
