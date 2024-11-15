@@ -87,44 +87,47 @@ impl<KD: Key> Dependencies<KD> {
         let runner = self.runner.clone();
         let dependency_key = self.key.clone();
         async move {
-            let mut rx = lock!(@sync map = runner.map; {
-                if let Some(handle) = map.get_mut(&AnyKey::new(dependency_key.clone())) {
-                    let handle = handle.downcast_mut::<Handle<KD>>().expect("handle type mismatch");
-                    if let Some(queue) = handle.dependencies.get_mut(&AnyKey::new(key.clone())) {
-                        let state = queue.pop_back();
-                        queue.clear();
-                        if let Some(state) = state {
-                            unlock!();
-                            return *state.downcast::<KU::State>().expect("queued dependency type mismatch")
+            let mut rx = 'lock: {
+                lock!(@sync map = runner.map; format!("ctrlflow::Dependencies {{ key: {dependency_key:?}, .. }}.get_latest({key:?})"); {
+                    if let Some(handle) = map.get_mut(&AnyKey::new(dependency_key.clone())) {
+                        let handle = handle.downcast_mut::<Handle<KD>>().expect("handle type mismatch");
+                        if let Some(queue) = handle.dependencies.get_mut(&AnyKey::new(key.clone())) {
+                            let state = queue.pop_back();
+                            queue.clear();
+                            if let Some(state) = state {
+                                unlock!();
+                                return *state.downcast::<KU::State>().expect("queued dependency type mismatch")
+                            }
                         }
                     }
-                }
-                match map.entry(AnyKey::new(key.clone())) {
-                    hash_map::Entry::Occupied(mut entry) => {
-                        let handle = entry.get_mut().downcast_mut::<Handle<KU>>().expect("handle type mismatch");
-                        handle.dependents.insert(AnyKey::new(dependency_key));
-                        if let Some(ref state) = handle.state {
-                            let state = state.clone();
+                    match map.entry(AnyKey::new(key.clone())) {
+                        hash_map::Entry::Occupied(mut entry) => {
+                            let handle = entry.get_mut().downcast_mut::<Handle<KU>>().expect("handle type mismatch");
+                            handle.dependents.insert(AnyKey::new(dependency_key));
+                            if let Some(ref state) = handle.state {
+                                let state = state.clone();
+                                unlock!();
+                                return state
+                            } else {
+                                handle.tx.subscribe()
+                            }
+                        }
+                        hash_map::Entry::Vacant(entry) => {
+                            let (tx, rx) = broadcast::channel(CHANNEL_CAPACITY);
+                            entry.insert(Box::new(Handle::<KU> {
+                                updating: false,
+                                state: None,
+                                dependents: iter::once(AnyKey::new(dependency_key)).collect(),
+                                dependencies: HashMap::default(),
+                                tx,
+                            }));
                             unlock!();
-                            return state
-                        } else {
-                            handle.tx.subscribe()
+                            runner.clone().start_maintaining(key);
+                            break 'lock rx
                         }
                     }
-                    hash_map::Entry::Vacant(entry) => {
-                        let (tx, rx) = broadcast::channel(CHANNEL_CAPACITY);
-                        entry.insert(Box::new(Handle::<KU> {
-                            updating: false,
-                            state: None,
-                            dependents: iter::once(AnyKey::new(dependency_key)).collect(),
-                            dependencies: HashMap::default(),
-                            tx,
-                        }));
-                        runner.clone().start_maintaining(key);
-                        rx
-                    }
-                }
-            });
+                })
+            };
             loop {
                 match rx.recv().await {
                     Ok(state) => break state,
@@ -140,7 +143,7 @@ impl<KD: Key> Dependencies<KD> {
     /// If there is not already a known state for the key, this returns `None`.
     pub fn try_get_latest<KU: Key>(&mut self, key: KU) -> Option<KU::State> {
         self.new.insert(AnyKey::new(key.clone()));
-        lock!(@sync map = self.runner.map; {
+        lock!(@sync map = self.runner.map; format!("ctrlflow::Dependencies {{ key: {:?}, .. }}.try_get_latest({key:?})", self.key); {
             if let Some(handle) = map.get_mut(&AnyKey::new(self.key.clone())) {
                 let handle = handle.downcast_mut::<Handle<KD>>().expect("handle type mismatch");
                 if let Some(queue) = handle.dependencies.get_mut(&AnyKey::new(key.clone())) {
@@ -170,7 +173,9 @@ impl<KD: Key> Dependencies<KD> {
                         dependents: iter::once(AnyKey::new(self.key.clone())).collect(),
                         dependencies: HashMap::default(),
                     }));
+                    unlock!();
                     self.runner.clone().start_maintaining(key);
+                    return None
                 }
             }
             None
@@ -187,44 +192,47 @@ impl<KD: Key> Dependencies<KD> {
         let runner = self.runner.clone();
         let dependency_key = self.key.clone();
         async move {
-            let mut rx = lock!(@sync map = runner.map; {
-                if let Some(handle) = map.get_mut(&AnyKey::new(dependency_key.clone())) {
-                    let handle = handle.downcast_mut::<Handle<KD>>().expect("handle type mismatch");
-                    if let Some(queue) = handle.dependencies.get_mut(&AnyKey::new(key.clone())) {
-                        if let Some(state) = queue.pop_front() {
-                            unlock!();
-                            return Next::New(*state.downcast::<KU::State>().expect("queued dependency type mismatch"))
+            let mut rx = 'lock: {
+                lock!(@sync map = runner.map; format!("ctrlflow::Dependencies {{ key: {dependency_key:?}, .. }}.get_next({key:?})"); {
+                    if let Some(handle) = map.get_mut(&AnyKey::new(dependency_key.clone())) {
+                        let handle = handle.downcast_mut::<Handle<KD>>().expect("handle type mismatch");
+                        if let Some(queue) = handle.dependencies.get_mut(&AnyKey::new(key.clone())) {
+                            if let Some(state) = queue.pop_front() {
+                                unlock!();
+                                return Next::New(*state.downcast::<KU::State>().expect("queued dependency type mismatch"))
+                            }
                         }
                     }
-                }
-                match map.entry(AnyKey::new(key.clone())) {
-                    hash_map::Entry::Occupied(mut entry) => {
-                        let handle = entry.get_mut().downcast_mut::<Handle<KU>>().expect("handle type mismatch");
-                        handle.dependents.insert(AnyKey::new(dependency_key.clone()));
-                        if let Some(ref state) = handle.state {
-                            let state = state.clone();
+                    match map.entry(AnyKey::new(key.clone())) {
+                        hash_map::Entry::Occupied(mut entry) => {
+                            let handle = entry.get_mut().downcast_mut::<Handle<KU>>().expect("handle type mismatch");
+                            handle.dependents.insert(AnyKey::new(dependency_key.clone()));
+                            if let Some(ref state) = handle.state {
+                                let state = state.clone();
+                                unlock!();
+                                return Next::Old(state)
+                            } else {
+                                handle.tx.subscribe()
+                            }
+                        }
+                        hash_map::Entry::Vacant(entry) => {
+                            let (tx, rx) = broadcast::channel(CHANNEL_CAPACITY);
+                            entry.insert(Box::new(Handle::<KU> {
+                                updating: false,
+                                state: None,
+                                dependents: iter::once(AnyKey::new(dependency_key.clone())).collect(),
+                                dependencies: HashMap::default(),
+                                tx,
+                            }));
                             unlock!();
-                            return Next::Old(state)
-                        } else {
-                            handle.tx.subscribe()
+                            runner.clone().start_maintaining(key.clone());
+                            break 'lock rx
                         }
                     }
-                    hash_map::Entry::Vacant(entry) => {
-                        let (tx, rx) = broadcast::channel(CHANNEL_CAPACITY);
-                        entry.insert(Box::new(Handle::<KU> {
-                            updating: false,
-                            state: None,
-                            dependents: iter::once(AnyKey::new(dependency_key.clone())).collect(),
-                            dependencies: HashMap::default(),
-                            tx,
-                        }));
-                        runner.clone().start_maintaining(key.clone());
-                        rx
-                    }
-                }
-            });
+                })
+            };
             let state = rx.recv().await.unwrap();
-            lock!(@sync map = runner.map; {
+            lock!(@sync map = runner.map; format!("ctrlflow::Dependencies {{ key: {dependency_key:?}, .. }}.get_next({key:?})"); {
                 let handle = map.get_mut(&AnyKey::new(dependency_key)).unwrap();
                 let handle = handle.downcast_mut::<Handle<KD>>().expect("handle type mismatch");
                 let queue = handle.dependencies.get_mut(&AnyKey::new(key)).unwrap();
@@ -241,7 +249,7 @@ impl<KD: Key> Dependencies<KD> {
     /// If there is not already a known state for the key, this returns `None`.
     pub fn try_get_next<KU: Key>(&mut self, key: KU) -> Option<Next<KU>> {
         self.new.insert(AnyKey::new(key.clone()));
-        lock!(@sync map = self.runner.map; {
+        lock!(@sync map = self.runner.map; format!("ctrlflow::Dependencies {{ key: {:?}, .. }}.try_get_next({key:?})", self.key); {
             if let Some(handle) = map.get_mut(&AnyKey::new(self.key.clone())) {
                 let handle = handle.downcast_mut::<Handle<KD>>().expect("handle type mismatch");
                 if let Some(queue) = handle.dependencies.get_mut(&AnyKey::new(key.clone())) {
@@ -269,7 +277,9 @@ impl<KD: Key> Dependencies<KD> {
                         dependents: iter::once(AnyKey::new(self.key.clone())).collect(),
                         dependencies: HashMap::default(),
                     }));
+                    unlock!();
                     self.runner.clone().start_maintaining(key);
+                    return None
                 }
             }
             None
@@ -299,7 +309,7 @@ impl Runner {
                 key: key.clone(),
                 new: HashSet::default(),
             };
-            let previous = lock!(@sync map = runner.map; {
+            let previous = lock!(@sync map = runner.map; format!("ctrlflow::Runner {{ .. }}.update_derived_state({key:?})"); {
                 let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else { return };
                 let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
                 if handle.updating {
@@ -311,7 +321,7 @@ impl Runner {
             });
             let Maintenance::Derived(get_state) = key.maintain() else { panic!("derived key turned into source") };
             if let Some(new_state) = get_state(&mut deps, previous).await {
-                lock!(@sync map = runner.map; {
+                lock!(@sync map = runner.map; format!("ctrlflow::Runner {{ .. }}.update_derived_state({key:?})"); {
                     let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else {
                         // no subscribers and no dependents
                         for dep in deps.new {
@@ -354,7 +364,7 @@ impl Runner {
                     }
                 });
             } else {
-                lock!(@sync map = runner.map; {
+                lock!(@sync map = runner.map; format!("ctrlflow::Runner {{ .. }}.update_derived_state({key:?})"); {
                     let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else {
                         // no subscribers and no dependents
                         for dep in deps.new {
@@ -380,7 +390,7 @@ impl Runner {
                 tokio::spawn(async move {
                     loop {
                         let new_state = stream.next().await;
-                        lock!(@sync map = self.map; {
+                        lock!(@sync map = self.map; format!("ctrlflow::Runner {{ .. }}.start_maintaining({key:?})"); {
                             let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else { break };
                             let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
                             handle.state = Some(new_state.clone());
@@ -406,7 +416,7 @@ impl Runner {
     }
 
     pub fn subscribe<K: Key>(&self, key: K) -> impl InfiniteStream<Item = K::State> + Unpin {
-        lock!(@sync map = self.map; match map.entry(AnyKey::new(key.clone())) {
+        lock!(@sync map = self.map; format!("ctrlflow::Runner {{ .. }}.subscribe({key:?})"); match map.entry(AnyKey::new(key.clone())) {
             hash_map::Entry::Occupied(entry) => {
                 let handle = entry.get().downcast_ref::<Handle<K>>().expect("handle type mismatch");
                 stream::iter(handle.state.clone())
@@ -423,8 +433,9 @@ impl Runner {
                     dependencies: HashMap::default(),
                     tx,
                 }));
+                unlock!();
                 self.clone().start_maintaining(key);
-                BroadcastStream::new(rx).filter_map(|res| future::ready(res.ok())).expect("broadcast ended").right_stream()
+                return BroadcastStream::new(rx).filter_map(|res| future::ready(res.ok())).expect("broadcast ended").right_stream()
             },
         })
     }

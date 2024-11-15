@@ -44,7 +44,7 @@ impl AnyKey {
                 let runner = runner.clone();
                 let self_update = self_update.clone();
                 Box::pin(async move {
-                    let should_update = lock!(@sync map = runner.map; if_chain! {
+                    let should_update = lock!(@sync map = runner.map; format!("ctrlflow::AnyKey::new({self_update:?})"); if_chain! {
                         if let Some(handle) = map.get_mut(&AnyKey::new(self_update.clone()));
                         let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
                         if let Some(queue) = handle.dependencies.get_mut(&dependency_key);
