@@ -374,9 +374,28 @@ impl Runner {
                         return
                     };
                     let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
-                    handle.updating = false;
-                    if handle.dependencies.values().any(|queue| !queue.is_empty()) {
-                        tokio::spawn(runner.update_derived_state(key));
+                    let has_dependents = !handle.dependents.is_empty() || handle.tx.receiver_count() > 0;
+                    if has_dependents {
+                        let dependencies_to_delete;
+                        (handle.dependencies, dependencies_to_delete) = handle.dependencies.drain().partition(|(dep, _)| deps.new.contains(dep));
+                        for dep in deps.new {
+                            if let hash_map::Entry::Vacant(entry) = handle.dependencies.entry(dep) {
+                                entry.insert(VecDeque::default());
+                            }
+                        }
+                        handle.updating = false;
+                        let re_run = handle.dependencies.values().any(|queue| !queue.is_empty());
+                        for (dep, _) in dependencies_to_delete {
+                            (dep.delete_dependent)(&mut map, AnyKey::new(key.clone()));
+                        }
+                        if re_run {
+                            tokio::spawn(runner.update_derived_state(key));
+                        }
+                    } else {
+                        for dep in handle.dependencies.drain().map(|(key, _)| key).chain(deps.new).collect::<Vec<_>>() {
+                            (dep.delete_dependent)(&mut map, AnyKey::new(key.clone()));
+                        }
+                        map.remove(&AnyKey::new(key));
                     }
                 });
             }
