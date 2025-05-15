@@ -343,11 +343,6 @@ impl Runner {
                     if any_notified {
                         let dependencies_to_delete;
                         (handle.dependencies, dependencies_to_delete) = handle.dependencies.drain().partition(|(dep, _)| deps.new.contains(dep));
-                        for dep in deps.new {
-                            if let hash_map::Entry::Vacant(entry) = handle.dependencies.entry(dep) {
-                                entry.insert(VecDeque::default());
-                            }
-                        }
                         handle.updating = false;
                         let re_run = handle.dependencies.values().any(|queue| !queue.is_empty());
                         for (dep, _) in dependencies_to_delete {
@@ -378,11 +373,6 @@ impl Runner {
                     if has_dependents {
                         let dependencies_to_delete;
                         (handle.dependencies, dependencies_to_delete) = handle.dependencies.drain().partition(|(dep, _)| deps.new.contains(dep));
-                        for dep in deps.new {
-                            if let hash_map::Entry::Vacant(entry) = handle.dependencies.entry(dep) {
-                                entry.insert(VecDeque::default());
-                            }
-                        }
                         handle.updating = false;
                         let re_run = handle.dependencies.values().any(|queue| !queue.is_empty());
                         for (dep, _) in dependencies_to_delete {

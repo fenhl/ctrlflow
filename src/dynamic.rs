@@ -13,7 +13,6 @@ use {
         pin::Pin,
     },
     futures::future::Future,
-    if_chain::if_chain,
     log_lock::*,
     crate::{
         Handle,
@@ -44,12 +43,10 @@ impl AnyKey {
                 let runner = runner.clone();
                 let self_update = self_update.clone();
                 Box::pin(async move {
-                    let should_update = lock!(@sync map = runner.map; format!("ctrlflow::AnyKey::new({self_update:?})"); if_chain! {
-                        if let Some(handle) = map.get_mut(&AnyKey::new(self_update.clone()));
-                        let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
-                        if let Some(queue) = handle.dependencies.get_mut(&dependency_key);
-                        then {
-                            queue.push_back(dependency_value);
+                    let should_update = lock!(@sync map = runner.map; format!("ctrlflow::AnyKey::new({self_update:?})"); {
+                        if let Some(handle) = map.get_mut(&AnyKey::new(self_update.clone())) {
+                            let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
+                            handle.dependencies.entry(dependency_key).or_default().push_back(dependency_value);
                             true
                         } else {
                             false
