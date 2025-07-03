@@ -10,10 +10,8 @@ use {
             Hash,
             Hasher,
         },
-        pin::Pin,
+        sync::Arc,
     },
-    futures::future::Future,
-    log_lock::*,
     crate::{
         Handle,
         Key,
@@ -25,7 +23,7 @@ pub(crate) struct AnyKey {
     data: Box<dyn Any + Send + Sync>,
     eq: Box<dyn Fn(&dyn Any) -> bool + Send + Sync>,
     hash: u64,
-    pub(crate) update: Box<dyn Fn(&Runner, AnyKey, Box<dyn Any + Send>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>,
+    pub(crate) update: Arc<dyn Fn(&Runner, &mut HashMap<AnyKey, Box<dyn Any + Send>>, AnyKey, Box<dyn Any + Send>) + Send + Sync>,
     pub(crate) delete_dependent: Box<dyn Fn(&mut HashMap<AnyKey, Box<dyn Any + Send>>, AnyKey) + Send + Sync>,
 }
 
@@ -39,23 +37,19 @@ impl AnyKey {
             data: Box::new(key),
             eq: Box::new(move |other| other.downcast_ref::<K>().map_or(false, |other| self_eq == *other)),
             hash: BuildHasherDefault::<DefaultHasher>::default().hash_one(self_hash),
-            update: Box::new(move |runner, dependency_key, dependency_value| {
+            update: Arc::new(move |runner, map, dependency_key, dependency_value| {
                 let runner = runner.clone();
                 let self_update = self_update.clone();
-                Box::pin(async move {
-                    let should_update = lock!(@sync map = runner.map; format!("ctrlflow::AnyKey::new({self_update:?})"); {
-                        if let Some(handle) = map.get_mut(&AnyKey::new(self_update.clone())) {
-                            let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
-                            handle.dependencies.entry(dependency_key).or_default().push_back(dependency_value);
-                            true
-                        } else {
-                            false
-                        }
-                    });
-                    if should_update {
-                        runner.update_derived_state(self_update.clone()).await;
-                    }
-                })
+                let should_update = if let Some(handle) = map.get_mut(&AnyKey::new(self_update.clone())) {
+                    let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
+                    handle.dependencies.entry(dependency_key).or_default().push_back(dependency_value);
+                    true
+                } else {
+                    false
+                };
+                if should_update {
+                    tokio::spawn(runner.update_derived_state(self_update.clone()));
+                }
             }),
             delete_dependent: Box::new(move |map, dependent_key| if let Some(handle) = map.get_mut(&AnyKey::new(self_delete_dependent.clone())) {
                 let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");

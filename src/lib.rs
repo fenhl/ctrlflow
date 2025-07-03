@@ -333,10 +333,11 @@ impl Runner {
                     let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
                     handle.state = Some(new_state.clone());
                     let mut any_notified = false;
-                    for dependent in &handle.dependents {
-                        tokio::spawn((dependent.update)(&runner, AnyKey::new(key.clone()), Box::new(new_state.clone())));
+                    for update in handle.dependents.iter().map(|dependent| dependent.update.clone()).collect::<Vec<_>>() {
+                        update(&runner, &mut map, AnyKey::new(key.clone()), Box::new(new_state.clone()));
                         any_notified = true;
                     }
+                    let handle = map.get_mut(&AnyKey::new(key.clone())).expect("checked above").downcast_mut::<Handle<K>>().expect("handle type mismatch");
                     if handle.tx.send(new_state.clone()).is_ok() {
                         any_notified = true;
                     }
@@ -404,10 +405,11 @@ impl Runner {
                             let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
                             handle.state = Some(new_state.clone());
                             let mut any_notified = false;
-                            for dependent in &handle.dependents {
-                                tokio::spawn((dependent.update)(&self, AnyKey::new(key.clone()), Box::new(new_state.clone())));
+                            for update in handle.dependents.iter().map(|dependent| dependent.update.clone()).collect::<Vec<_>>() {
+                                update(&self, &mut map, AnyKey::new(key.clone()), Box::new(new_state.clone()));
                                 any_notified = true;
                             }
+                            let handle = map.get_mut(&AnyKey::new(key.clone())).expect("checked above").downcast_mut::<Handle<K>>().expect("handle type mismatch");
                             if handle.tx.send(new_state.clone()).is_ok() {
                                 any_notified = true;
                             }
