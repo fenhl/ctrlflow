@@ -82,7 +82,7 @@ impl<KD: Key> Dependencies<KD> {
     /// Returns the current state of the given key.
     ///
     /// If there is not already a known state for the key, this waits until it is computed.
-    pub fn get_latest<KU: Key>(&mut self, key: KU) -> impl Future<Output = KU::State> {
+    pub fn get_latest<KU: Key>(&mut self, key: KU) -> impl Future<Output = KU::State> + use<KU, KD> {
         self.new.insert(AnyKey::new(key.clone()));
         let runner = self.runner.clone();
         let dependency_key = self.key.clone();
@@ -187,7 +187,7 @@ impl<KD: Key> Dependencies<KD> {
     /// To ensure that no intermediate states are skipped, this must be called each time, and must not be mixed with `get_latest` or `try_get_latest` calls on the same key.
     ///
     /// If there is not already a known state for the key, this waits until it is computed.
-    pub fn get_next<KU: Key>(&mut self, key: KU) -> impl Future<Output = Next<KU>> {
+    pub fn get_next<KU: Key>(&mut self, key: KU) -> impl Future<Output = Next<KU>> + use<KU, KD> {
         self.new.insert(AnyKey::new(key.clone()));
         let runner = self.runner.clone();
         let dependency_key = self.key.clone();
@@ -426,7 +426,7 @@ impl Runner {
         }
     }
 
-    pub fn subscribe<K: Key>(&self, key: K) -> impl InfiniteStream<Item = K::State> + Unpin {
+    pub fn subscribe<K: Key>(&self, key: K) -> impl InfiniteStream<Item = K::State> + Unpin + use<K> {
         lock!(@sync map = self.map; format!("ctrlflow::Runner {{ .. }}.subscribe({key:?})"); match map.entry(AnyKey::new(key.clone())) {
             hash_map::Entry::Occupied(entry) => {
                 let handle = entry.get().downcast_ref::<Handle<K>>().expect("handle type mismatch");
