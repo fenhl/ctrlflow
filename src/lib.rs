@@ -60,6 +60,17 @@ where K::State: PartialEq {
     })))
 }
 
+pub fn try_filter_eq<T, E, K: Key<State = Result<T, E>>>(f: impl for<'d> FnOnce(&'d mut Dependencies<K>, Option<&K::State>) -> Pin<Box<dyn Future<Output = K::State> + Send + 'd>> + Send + 'static) -> Maintenance<K>
+where T: PartialEq + Send + 'static, E: Send + 'static {
+    Maintenance::Derived(Box::new(|dependencies, previous| Box::pin(async move {
+        let next = f(dependencies, previous.as_ref()).await;
+        match (previous, next) {
+            (Some(Ok(previous)), Ok(next)) if previous != next => None,
+            (_, next) => Some(next),
+        }
+    })))
+}
+
 /// Return value of [`Dependencies::get_next`] and [`Dependencies::try_get_next`].
 ///
 /// See those functions' docs for details.

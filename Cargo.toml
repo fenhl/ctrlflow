@@ -1,6 +1,6 @@
 [package]
 name = "ctrlflow"
-version = "1.0.6"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.91" # nixpkgs stable
 
