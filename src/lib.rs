@@ -65,7 +65,7 @@ where T: PartialEq + Send + 'static, E: Send + 'static {
     Maintenance::Derived(Box::new(|dependencies, previous| Box::pin(async move {
         let next = f(dependencies, previous.as_ref()).await;
         match (previous, next) {
-            (Some(Ok(previous)), Ok(next)) if previous != next => None,
+            (Some(Ok(previous)), Ok(next)) if previous == next => None,
             (_, next) => Some(next),
         }
     })))
