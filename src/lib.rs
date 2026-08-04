@@ -31,7 +31,10 @@ use {
         StreamExt as _,
     },
     log_lock::*,
-    tokio::sync::broadcast,
+    tokio::{
+        sync::broadcast,
+        task,
+    },
     tokio_stream::wrappers::BroadcastStream,
     crate::dynamic::AnyKey,
 };
@@ -39,6 +42,17 @@ use {
 mod dynamic;
 
 const CHANNEL_CAPACITY: usize = 256;
+
+fn spawn<Fut: Future + Send + 'static>(#[cfg_attr(not(feature = "tokio-unstable"), allow(unused))] name: &str, future: Fut) -> task::JoinHandle<Fut::Output>
+where Fut::Output: Send + 'static {
+    cfg_select! {
+        feature = "tokio-unstable" => task::Builder::default()
+            .name(name)
+            .spawn(future)
+            .expect("tokio::task::Builder::spawn errored"),
+        _ => task::spawn(future),
+    }
+}
 
 pub trait Key: fmt::Debug + Clone + Eq + Hash + Send + Sync + 'static {
     type State: fmt::Debug + Clone + Send + Sync;
@@ -361,7 +375,7 @@ impl Runner {
                             (dep.delete_dependent)(&mut map, AnyKey::new(key.clone()));
                         }
                         if re_run {
-                            tokio::spawn(runner.update_derived_state(key));
+                            spawn(&format!("update_derived_state for {key:?}"), runner.update_derived_state(key));
                         }
                     } else {
                         for dep in handle.dependencies.drain().map(|(key, _)| key).chain(deps.new).collect::<Vec<_>>() {
@@ -391,7 +405,7 @@ impl Runner {
                             (dep.delete_dependent)(&mut map, AnyKey::new(key.clone()));
                         }
                         if re_run {
-                            tokio::spawn(runner.update_derived_state(key));
+                            spawn(&format!("update_derived_state for {key:?}"), runner.update_derived_state(key));
                         }
                     } else {
                         for dep in handle.dependencies.drain().map(|(key, _)| key).chain(deps.new).collect::<Vec<_>>() {
@@ -404,11 +418,11 @@ impl Runner {
         })
     }
 
-    fn start_maintaining<K: Key>(self, key: K) -> tokio::task::JoinHandle<()> {
+    fn start_maintaining<K: Key>(self, key: K) -> task::JoinHandle<()> {
         match key.maintain() {
             Maintenance::Stream(stream_fn) => {
                 let mut stream = stream_fn(self.clone());
-                tokio::spawn(async move {
+                spawn(&format!("stream for {key:?}"), async move {
                     loop {
                         let new_state = stream.next().await;
                         lock!(@sync map = self.map; format!("ctrlflow::Runner {{ .. }}.start_maintaining({key:?})"); {
@@ -433,7 +447,7 @@ impl Runner {
                     }
                 })
             }
-            Maintenance::Derived(_) => tokio::spawn(self.update_derived_state(key)),
+            Maintenance::Derived(_) => spawn(&format!("update_derived_state for {key:?}"), self.update_derived_state(key)),
         }
     }
 

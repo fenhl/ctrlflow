@@ -15,6 +15,9 @@ unused_lifetimes = "deny"
 unused_qualifications = "deny"
 warnings = "deny"
 
+[features]
+tokio-unstable = ["tokio/tracing"] # requires rustflags `--cfg tokio_unstable`
+
 [dependencies]
 futures = "0.3"
 infinite-stream = "0.2"

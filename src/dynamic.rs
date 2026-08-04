@@ -39,7 +39,6 @@ impl AnyKey {
             hash: BuildHasherDefault::<DefaultHasher>::default().hash_one(self_hash),
             update: Arc::new(move |runner, map, dependency_key, dependency_value| {
                 let runner = runner.clone();
-                let self_update = self_update.clone();
                 let should_update = if let Some(handle) = map.get_mut(&AnyKey::new(self_update.clone())) {
                     let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
                     handle.dependencies.entry(dependency_key).or_default().push_back(dependency_value);
@@ -48,7 +47,7 @@ impl AnyKey {
                     false
                 };
                 if should_update {
-                    tokio::spawn(runner.update_derived_state(self_update.clone()));
+                    crate::spawn(&format!("update_derived_state for {self_update:?}"), runner.update_derived_state(self_update.clone()));
                 }
             }),
             delete_dependent: Box::new(move |map, dependent_key| if let Some(handle) = map.get_mut(&AnyKey::new(self_delete_dependent.clone())) {
