@@ -2,7 +2,7 @@
 name = "ctrlflow"
 version = "1.1.1"
 edition = "2024"
-rust-version = "1.91" # nixpkgs stable
+rust-version = "1.95" # nixpkgs stable
 
 [lints.rust]
 #missing_docs = "deny" #TODO
