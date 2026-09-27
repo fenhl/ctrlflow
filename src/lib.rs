@@ -334,7 +334,7 @@ impl Runner {
                 key: key.clone(),
                 new: HashSet::default(),
             };
-            let previous = lock!(@sync map = runner.map; format!("ctrlflow::Runner {{ .. }}.update_derived_state({key:?})"); {
+            let previous = lock!(@sync map = runner.map; format!("ctrlflow::Runner {{ .. }}.update_derived_state({key:?}) previous"); {
                 let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else { return };
                 let handle = handle.downcast_mut::<Handle<K>>().expect("handle type mismatch");
                 if handle.updating {
@@ -346,7 +346,7 @@ impl Runner {
             });
             let Maintenance::Derived(get_state) = key.maintain() else { panic!("derived key turned into source") };
             if let Some(new_state) = get_state(&mut deps, previous).await {
-                lock!(@sync map = runner.map; format!("ctrlflow::Runner {{ .. }}.update_derived_state({key:?})"); {
+                lock!(@sync map = runner.map; format!("ctrlflow::Runner {{ .. }}.update_derived_state({key:?}) Some"); {
                     let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else {
                         // no subscribers and no dependents
                         for dep in deps.new {
@@ -385,7 +385,7 @@ impl Runner {
                     }
                 });
             } else {
-                lock!(@sync map = runner.map; format!("ctrlflow::Runner {{ .. }}.update_derived_state({key:?})"); {
+                lock!(@sync map = runner.map; format!("ctrlflow::Runner {{ .. }}.update_derived_state({key:?}) None"); {
                     let Some(handle) = map.get_mut(&AnyKey::new(key.clone())) else {
                         // no subscribers and no dependents
                         for dep in deps.new {
